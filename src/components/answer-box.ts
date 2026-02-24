@@ -18,8 +18,8 @@ export class AnswerBoxComponent extends Container {
   setText(text: string) {
     this.value = text;
     const rendered = formatResponse(text);
-    // Prevent "⏺" from appearing on its own line when model output starts with newlines.
-    const normalized = rendered.replace(/^\n+/, '');
+    // Normalize whitespace: strip leading/trailing newlines, collapse 3+ consecutive newlines to 2.
+    const normalized = rendered.replace(/^\n+/, '').replace(/\n+$/, '').replace(/\n{3,}/g, '\n\n');
     const value = this.streaming ? `${normalized}▌` : normalized;
     this.body.setText(`${theme.primary('⏺ ')}${value}`);
   }

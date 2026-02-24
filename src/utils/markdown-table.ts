@@ -275,5 +275,7 @@ export function formatResponse(content: string): string {
   let result = content;
   result = transformMarkdownTables(result);
   result = transformBold(result);
+  // Collapse runs of 3+ consecutive newlines to exactly 2 (preserve paragraph breaks).
+  result = result.replace(/\n{3,}/g, '\n\n');
   return result;
 }
