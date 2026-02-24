@@ -212,7 +212,7 @@ export class AuthController {
     const { startGoogleOAuth, exchangeGoogleCode, GOOGLE_CALLBACK_PORT } = await import('../auth/index.js');
     const { startCallbackServer } = await import('../auth/callback-server.js');
 
-    const { url, verifier } = await startGoogleOAuth();
+    const { url, verifier, state } = await startGoogleOAuth();
 
     this.stateValue = 'oauth_waiting';
     this.messageValue = 'Browser opened. Waiting for Google authorization...';
@@ -221,7 +221,7 @@ export class AuthController {
     openUrl(url);
 
     try {
-      const { code } = await startCallbackServer(GOOGLE_CALLBACK_PORT);
+      const { code } = await startCallbackServer(GOOGLE_CALLBACK_PORT, state);
       const creds = await exchangeGoogleCode(code, verifier);
       if (creds.accessToken) {
         const provider = PROVIDERS.find((p) => p.id === providerId);

@@ -13,6 +13,10 @@ import { getOllamaModels } from '../utils/ollama.js';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from '../model/llm.js';
 import { InMemoryChatHistory } from '../utils/in-memory-chat-history.js';
 
+// Providers that support OAuth — skip API key prompt for these.
+// Users authenticate via /auth flow; runtime handles missing credentials gracefully.
+const OAUTH_PROVIDERS = new Set(['anthropic', 'google', 'openai']);
+
 const SELECTION_STATES = [
   'provider_select',
   'model_select',
@@ -41,7 +45,7 @@ export class ModelSelectionController {
   private pendingSelectedModelId: string | null = null;
   private readonly onError: (message: string) => void;
   private readonly onChange?: ChangeListener;
-  private readonly chatHistory = new InMemoryChatHistory(DEFAULT_MODEL);
+  private readonly chatHistory = new InMemoryChatHistory(DEFAULT_MODEL, DEFAULT_PROVIDER);
 
   constructor(onError: (message: string) => void, onChange?: ChangeListener) {
     this.onError = onError;
@@ -50,7 +54,7 @@ export class ModelSelectionController {
     const savedModel = getSetting('modelId', null) as string | null;
     this.modelValue =
       savedModel ?? getDefaultModelForProvider(this.providerValue) ?? DEFAULT_MODEL;
-    this.chatHistory.setModel(this.modelValue);
+    this.chatHistory.setModel(this.modelValue, this.providerValue);
   }
 
   get state(): ModelSelectionState {
@@ -129,7 +133,7 @@ export class ModelSelectionController {
       return;
     }
 
-    if (checkApiKeyExistsForProvider(this.pendingProviderValue)) {
+    if (OAUTH_PROVIDERS.has(this.pendingProviderValue) || checkApiKeyExistsForProvider(this.pendingProviderValue)) {
       this.completeModelSwitch(this.pendingProviderValue, modelId);
       return;
     }
@@ -150,7 +154,7 @@ export class ModelSelectionController {
     }
 
     const fullModelId = `${this.pendingProviderValue}:${modelName}`;
-    if (checkApiKeyExistsForProvider(this.pendingProviderValue)) {
+    if (OAUTH_PROVIDERS.has(this.pendingProviderValue) || checkApiKeyExistsForProvider(this.pendingProviderValue)) {
       this.completeModelSwitch(this.pendingProviderValue, fullModelId);
       return;
     }
@@ -220,7 +224,7 @@ export class ModelSelectionController {
     this.modelValue = newModelId;
     setSetting('provider', newProvider);
     setSetting('modelId', newModelId);
-    this.chatHistory.setModel(newModelId);
+    this.chatHistory.setModel(newModelId, newProvider);
     this.pendingProviderValue = null;
     this.pendingModelsValue = [];
     this.pendingSelectedModelId = null;

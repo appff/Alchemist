@@ -15,7 +15,7 @@ function getSession(sessionKey: string, model: string): SessionState {
     return existing;
   }
   const created: SessionState = {
-    history: new InMemoryChatHistory(model),
+    history: new InMemoryChatHistory(model, 'openai'),
     tail: Promise.resolve(),
   };
   sessions.set(sessionKey, created);
@@ -51,7 +51,8 @@ export async function runAgentForMessage(req: AgentRunRequest): Promise<string> 
       }
     }
     if (finalAnswer) {
-      await session.history.saveAnswer(finalAnswer);
+      // Fire-and-forget: don't block response while summary generates
+      session.history.saveAnswer(finalAnswer).catch(() => {});
     }
   };
 

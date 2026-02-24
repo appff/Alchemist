@@ -54,7 +54,7 @@ export async function startCallbackServer(
       }
 
       // Only handle /auth/callback — silently ignore other paths (favicon, etc.)
-      if (url.pathname !== '/auth/callback') {
+      if (url.pathname !== '/auth/callback' && url.pathname !== '/oauth-callback') {
         res.writeHead(404);
         res.end();
         return;

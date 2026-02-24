@@ -1,3 +1,7 @@
+import { appendFileSync, mkdirSync, existsSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 interface LogEntry {
@@ -9,6 +13,9 @@ interface LogEntry {
 }
 
 type LogSubscriber = (logs: LogEntry[]) => void;
+
+const LOG_DIR = join(homedir(), '.dexter');
+const LOG_FILE = join(LOG_DIR, 'debug.log');
 
 class DebugLogger {
   private logs: LogEntry[] = [];
@@ -32,6 +39,16 @@ class DebugLogger {
       this.logs = this.logs.slice(-this.maxLogs);
     }
     this.emit();
+
+    // Also write to file for external debugging
+    try {
+      if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+      const ts = entry.timestamp.toISOString();
+      const line = data
+        ? `${ts} [${level.toUpperCase()}] ${message} ${JSON.stringify(data)}\n`
+        : `${ts} [${level.toUpperCase()}] ${message}\n`;
+      appendFileSync(LOG_FILE, line);
+    } catch { /* ignore file write errors */ }
   }
 
   debug(message: string, data?: unknown) {

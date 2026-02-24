@@ -2,23 +2,26 @@ import crypto from 'crypto';
 import { startCallbackServer } from './callback-server.js';
 import { saveCredentials, type OAuthCredentials } from './credentials.js';
 
-// Antigravity (Gemini Code Assist) client credentials
+// Antigravity (Google internal IDE) OAuth credentials — enables Gemini 3.x model access
+// via sandbox Cloud Code Assist endpoints (matching opencode-antigravity-auth plugin)
 const CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID ?? '';
 const CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? '';
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
-const CALLBACK_PORT = 19877;
-const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}`;
+const CALLBACK_PORT = 51121;
+const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/oauth-callback`;
 const SCOPES = [
   'https://www.googleapis.com/auth/cloud-platform',
-  'https://www.googleapis.com/auth/generative-language',
   'https://www.googleapis.com/auth/userinfo.email',
   'https://www.googleapis.com/auth/userinfo.profile',
+  'https://www.googleapis.com/auth/cclog',
+  'https://www.googleapis.com/auth/experimentsandconfigs',
 ];
 
 export interface GoogleAuthResult {
   url: string;
   verifier: string;
+  state: string;
 }
 
 export async function startGoogleOAuth(): Promise<GoogleAuthResult> {
@@ -37,7 +40,7 @@ export async function startGoogleOAuth(): Promise<GoogleAuthResult> {
   url.searchParams.set('access_type', 'offline');
   url.searchParams.set('prompt', 'consent');
 
-  return { url: url.toString(), verifier };
+  return { url: url.toString(), verifier, state };
 }
 
 export async function exchangeGoogleCode(

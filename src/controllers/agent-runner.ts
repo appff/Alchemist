@@ -231,7 +231,8 @@ export class AgentRunnerController {
       case 'done': {
         const done = event as DoneEvent;
         if (done.answer) {
-          await this.inMemoryChatHistory.saveAnswer(done.answer).catch(() => {});
+          // Fire-and-forget: don't block UI rendering while summary generates
+          this.inMemoryChatHistory.saveAnswer(done.answer).catch(() => {});
         }
         this.updateLastItem((last) => ({
           ...last,

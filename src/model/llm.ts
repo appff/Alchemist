@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { DEFAULT_SYSTEM_PROMPT } from '@/agent/prompts';
 import type { TokenUsage } from '@/agent/types';
 import { logger } from '@/utils';
+import { getSetting, setSetting } from '@/utils/config';
 import { resolveProvider, getProviderById } from '@/providers';
 import {
   hasValidCredentials,
@@ -32,7 +33,7 @@ export function getFastModel(modelProvider: string, fallbackModel: string): stri
   return getProviderById(modelProvider)?.fastModel ?? fallbackModel;
 }
 
-// Generic retry helper with exponential backoff
+// Generic retry helper with exponential backoff and 429 rate-limit awareness
 async function withRetry<T>(fn: () => Promise<T>, provider: string, maxAttempts = 3): Promise<T> {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
@@ -49,6 +50,18 @@ async function withRetry<T>(fn: () => Promise<T>, provider: string, maxAttempts 
       if (attempt === maxAttempts - 1) {
         throw new Error(`[${provider} API] ${message}`);
       }
+
+      // For 429 rate-limit errors, parse the reset time and wait accordingly
+      if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED') || message.includes('quota')) {
+        const resetMatch = message.match(/reset after (\d+)s/);
+        const resetSeconds = resetMatch ? parseInt(resetMatch[1], 10) : 0;
+        if (resetSeconds > 0) {
+          logger.info(`[${provider} API] Rate limited — waiting ${resetSeconds}s for quota reset`);
+          await new Promise((r) => setTimeout(r, resetSeconds * 1000));
+          continue;
+        }
+      }
+
       await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
     }
   }
@@ -90,8 +103,8 @@ type ModelFactory = (name: string, opts: ModelOpts) => BaseChatModel;
 
 function getApiKey(envVar: string): string {
   const apiKey = process.env[envVar];
-  if (!apiKey) {
-    throw new Error(`[LLM] ${envVar} not found in environment variables`);
+  if (!apiKey || apiKey === 'your-api-key') {
+    throw new Error(`[LLM] ${envVar} is not set. Please set a valid API key in .env or use OAuth login.`);
   }
   return apiKey;
 }
@@ -111,8 +124,8 @@ function getOAuthToken(provider: 'anthropic' | 'google' | 'openai'): string | nu
   // or we can eagerly refresh if we detect expiry. For simplicity, the
   // refresh is done lazily — callers that hit 401 should trigger a refresh.
   // However, we CAN do a sync check and log a warning.
-  if (creds.expiresAt < Date.now() - 60_000) {
-    logger.warn(`[OAuth] ${provider} token expired — will attempt refresh on next retry`);
+  if (creds.expiresAt < Date.now() + 60_000) {
+    logger.warn(`[OAuth] ${provider} token expires at ${new Date(creds.expiresAt).toISOString()} — will attempt refresh on next retry`);
   }
   return creds.accessToken;
 }
@@ -371,14 +384,260 @@ function createChatGPTFetch(token: string, accountId: string) {
   };
 }
 
-// Global fetch interceptor for Google OAuth via Antigravity (Gemini Code Assist).
-// The @google/generative-ai SDK sends requests to generativelanguage.googleapis.com
-// with an x-goog-api-key header. Antigravity OAuth tokens don't work with that API.
-// Instead, we redirect requests to the Cloud Code Assist API (cloudcode-pa.googleapis.com)
-// wrapping the request body in the Antigravity format, matching opencode-antigravity-auth.
-const ANTIGRAVITY_ENDPOINT = 'https://cloudcode-pa.googleapis.com';
+// --- Antigravity request sanitization (matching opencode-antigravity-auth) ---
+
+// JSON Schema keywords not supported by the Antigravity/Gemini backend
+const UNSUPPORTED_SCHEMA_KEYS = new Set([
+  'additionalProperties', '$schema', '$id', '$comment', '$ref', '$defs',
+  'definitions', 'const', 'contentMediaType', 'contentEncoding',
+  'if', 'then', 'else', 'not', 'patternProperties',
+  'unevaluatedProperties', 'unevaluatedItems', 'dependentRequired',
+  'dependentSchemas', 'propertyNames', 'minContains', 'maxContains',
+  'minLength', 'maxLength', 'exclusiveMinimum', 'exclusiveMaximum',
+  'pattern', 'minItems', 'maxItems', 'format', 'default', 'examples',
+  'title',
+]);
+
+/**
+ * Recursively sanitize a JSON Schema for Gemini/Antigravity compatibility.
+ * Uppercases type values, removes unsupported keywords, flattens unions.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function sanitizeGeminiSchema(schema: any): any {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) return schema.map(sanitizeGeminiSchema);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result: any = {};
+
+  for (const [key, value] of Object.entries(schema)) {
+    if (UNSUPPORTED_SCHEMA_KEYS.has(key)) continue;
+
+    if (key === 'type' && typeof value === 'string') {
+      result.type = value.toUpperCase();
+    } else if (key === 'type' && Array.isArray(value)) {
+      // Flatten type arrays — pick first non-null type
+      const nonNull = value.filter((t: string) => t !== 'null');
+      result.type = ((nonNull[0] as string) || 'STRING').toUpperCase();
+    } else if (key === 'anyOf' || key === 'oneOf') {
+      // Flatten unions — pick first non-null option
+      if (Array.isArray(value)) {
+        // Check if all options are const/single-enum → merge into enum
+        const constVals = value
+          .map((v: { const?: unknown; enum?: unknown[] }) => v?.const ?? (Array.isArray(v?.enum) && v.enum.length === 1 ? v.enum[0] : undefined))
+          .filter((v: unknown) => v !== undefined);
+        if (constVals.length === value.length && constVals.length > 0) {
+          result.enum = constVals;
+        } else {
+          const nonNull = value.filter((v: { type?: string }) => v?.type !== 'null');
+          if (nonNull.length > 0) {
+            Object.assign(result, sanitizeGeminiSchema(nonNull[0]));
+          }
+        }
+      }
+    } else if (key === 'allOf') {
+      // Merge allOf into single schema
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          Object.assign(result, sanitizeGeminiSchema(item));
+        }
+      }
+    } else if (typeof value === 'object' && value !== null) {
+      result[key] = sanitizeGeminiSchema(value);
+    } else {
+      result[key] = value;
+    }
+  }
+
+  // Fix required to only reference existing properties
+  if (Array.isArray(result.required) && result.properties && typeof result.properties === 'object') {
+    result.required = result.required.filter((r: string) => r in result.properties);
+    if (result.required.length === 0) delete result.required;
+  }
+
+  // For arrays without items, add default
+  if (result.type === 'ARRAY' && !result.items) {
+    result.items = { type: 'STRING' };
+  }
+
+  return result;
+}
+
+// Valid part keys for Gemini content filtering
+const VALID_PART_KEYS = new Set([
+  'text', 'functionCall', 'functionResponse', 'inlineData',
+  'fileData', 'executableCode', 'codeExecutionResult', 'thought',
+]);
+
+/**
+ * Sanitize the inner request payload for Antigravity compatibility.
+ * Cleans tool schemas, filters content parts, validates system instructions.
+ */
+function sanitizeAntigravityPayload(payload: Record<string, unknown>): void {
+  // Sanitize tool schemas
+  if (Array.isArray(payload.tools)) {
+    payload.tools = (payload.tools as Record<string, unknown>[]).map((tool) => {
+      const funcDecls = tool.functionDeclarations;
+      if (Array.isArray(funcDecls)) {
+        tool.functionDeclarations = funcDecls.map((decl: Record<string, unknown>) => {
+          if (decl.parameters) {
+            decl.parameters = sanitizeGeminiSchema(decl.parameters);
+            const params = decl.parameters as Record<string, unknown>;
+            if (!params.type) params.type = 'OBJECT';
+          }
+          // Sanitize tool name
+          if (typeof decl.name === 'string') {
+            decl.name = decl.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+          }
+          return decl;
+        });
+      }
+      return tool;
+    });
+    // Remove empty tools array
+    if ((payload.tools as unknown[]).length === 0) delete payload.tools;
+  }
+
+  // Sanitize content parts
+  if (Array.isArray(payload.contents)) {
+    payload.contents = (payload.contents as Record<string, unknown>[])
+      .map((content) => {
+        if (Array.isArray(content.parts)) {
+          content.parts = (content.parts as Record<string, unknown>[]).filter((part) =>
+            Object.keys(part).some((k) => VALID_PART_KEYS.has(k)),
+          );
+        }
+        return content;
+      })
+      .filter((content) => Array.isArray(content.parts) && (content.parts as unknown[]).length > 0);
+  }
+
+  // Sanitize systemInstruction
+  if (payload.systemInstruction && typeof payload.systemInstruction === 'object') {
+    const si = payload.systemInstruction as Record<string, unknown>;
+    if (Array.isArray(si.parts)) {
+      si.parts = (si.parts as Record<string, unknown>[]).filter((part) =>
+        Object.keys(part).some((k) => VALID_PART_KEYS.has(k)),
+      );
+      if ((si.parts as unknown[]).length === 0) delete payload.systemInstruction;
+    }
+  }
+
+  // Remove safetySettings if they have unsupported format
+  if (Array.isArray(payload.safetySettings)) {
+    payload.safetySettings = (payload.safetySettings as Record<string, unknown>[]).filter(
+      (s) => s.category && s.threshold,
+    );
+    if ((payload.safetySettings as unknown[]).length === 0) delete payload.safetySettings;
+  }
+}
+
+// --- Antigravity endpoint configuration (matching opencode-antigravity-auth) ---
+// Gemini 3.x models are available on sandbox endpoints; 2.5 on production.
+const ANTIGRAVITY_ENDPOINTS = {
+  daily: 'https://daily-cloudcode-pa.sandbox.googleapis.com',
+  autopush: 'https://autopush-cloudcode-pa.sandbox.googleapis.com',
+  prod: 'https://cloudcode-pa.googleapis.com',
+};
+
+// Request fallback order: sandbox first (has Gemini 3), then production
+const ANTIGRAVITY_FALLBACKS = [
+  ANTIGRAVITY_ENDPOINTS.daily,
+  ANTIGRAVITY_ENDPOINTS.autopush,
+  ANTIGRAVITY_ENDPOINTS.prod,
+];
+
+// Project discovery: production first (more reliable), then sandboxes
+const LOAD_ENDPOINTS = [
+  ANTIGRAVITY_ENDPOINTS.prod,
+  ANTIGRAVITY_ENDPOINTS.daily,
+];
+
+/**
+ * Transform model name for Antigravity style.
+ * - Strip `-preview` and `-preview-customtools` suffixes
+ * - Gemini 3 Pro models get `-low` tier suffix if no tier present
+ */
+function toAntigravityModelName(model: string): string {
+  let name = model
+    .replace(/-preview-customtools$/i, '')
+    .replace(/-preview$/i, '');
+
+  // Gemini 3 Pro models default to -low tier
+  const isGemini3Pro = /^gemini-3(\.1)?-pro$/i.test(name);
+  const hasTier = /-(low|medium|high)$/i.test(name);
+  if (isGemini3Pro && !hasTier) {
+    name = `${name}-low`;
+  }
+
+  return name;
+}
+
+// Cache the managed project ID from loadCodeAssist or settings
+let _managedProjectId: string | null = null;
+async function getManagedProjectId(accessToken: string): Promise<string> {
+  if (_managedProjectId) return _managedProjectId;
+
+  // 1. Check saved project in settings
+  const savedProject = getSetting('gcpProjectId', null) as string | null;
+  if (savedProject) {
+    _managedProjectId = savedProject;
+    logger.info(`[Antigravity] Using saved project: ${_managedProjectId}`);
+    return _managedProjectId;
+  }
+
+  // 2. Try loadCodeAssist to get managed project
+  for (const endpoint of LOAD_ENDPOINTS) {
+    try {
+      const res = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'google-api-nodejs-client/9.15.1',
+        },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as {
+        cloudaicompanionProject?: string | { id?: string };
+        allowedTiers?: Array<{ id: string; userDefinedCloudaicompanionProject?: boolean }>;
+      };
+
+      const proj = data.cloudaicompanionProject;
+      const projectId = typeof proj === 'string' ? proj : proj?.id;
+      if (projectId) {
+        _managedProjectId = projectId;
+        setSetting('gcpProjectId', projectId);
+        logger.info(`[Antigravity] Managed project: ${_managedProjectId}`);
+        return _managedProjectId;
+      }
+    } catch { /* try next */ }
+  }
+
+  // 3. Try cloudresourcemanager as last resort
+  try {
+    const projRes = await fetch('https://cloudresourcemanager.googleapis.com/v1/projects', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (projRes.ok) {
+      const projData = (await projRes.json()) as { projects?: Array<{ projectId: string; lifecycleState: string }> };
+      const active = projData.projects?.find((p) => p.lifecycleState === 'ACTIVE');
+      if (active) {
+        _managedProjectId = active.projectId;
+        setSetting('gcpProjectId', active.projectId);
+        logger.info(`[Antigravity] GCP project from cloudresourcemanager: ${_managedProjectId}`);
+        return _managedProjectId;
+      }
+    }
+  } catch { /* fall through */ }
+
+  logger.warn('[Antigravity] No project found. Set gcpProjectId in settings.');
+  return '';
+}
+
 let _googleOAuthFetchInstalled = false;
-function installGoogleOAuthFetch(token: string) {
+function installGoogleOAuthFetch() {
   if (_googleOAuthFetchInstalled) return;
   const origFetch = globalThis.fetch;
   (globalThis as Record<string, unknown>).fetch = async (
@@ -396,97 +655,151 @@ function installGoogleOAuthFetch(token: string) {
       return origFetch.call(globalThis, input, init);
     }
 
+    try {
+    // Read fresh credentials on each request to avoid stale tokens
+    const creds = loadCredentials('google');
+    if (!creds) {
+      return origFetch.call(globalThis, input, init);
+    }
+
     // Extract model name and action from the URL
-    // Format: .../v1beta/models/{model}:{action}
     const match = url.match(/\/models\/([^:?]+):(\w+)/);
     if (!match) {
       return origFetch.call(globalThis, input, init);
     }
-    const [, modelName, action] = match;
+    const [, rawModelName, action] = match;
     const isStreaming = action === 'streamGenerateContent';
 
-    // Build Antigravity endpoint URL
-    const antigravityUrl = `${ANTIGRAVITY_ENDPOINT}/v1internal:${action}${isStreaming ? '?alt=sse' : ''}`;
+    // Transform model name for Antigravity
+    const effectiveModel = toAntigravityModelName(rawModelName);
 
     // Wrap request body in Antigravity format
     let body = init?.body;
     if (typeof body === 'string') {
       try {
         const originalPayload = JSON.parse(body);
+        if ('model' in originalPayload) delete originalPayload.model;
+
+        sanitizeAntigravityPayload(originalPayload);
+
+        // Clean up generationConfig
+        if (originalPayload.generationConfig && typeof originalPayload.generationConfig === 'object') {
+          const gc = originalPayload.generationConfig as Record<string, unknown>;
+          if (Array.isArray(gc.stopSequences) && gc.stopSequences.length === 0) delete gc.stopSequences;
+          if (Object.keys(gc).length === 0) delete originalPayload.generationConfig;
+        }
+
+        const projectId = await getManagedProjectId(creds.accessToken);
         const wrappedBody = {
-          project: 'alchemist-cli',
-          model: modelName,
+          project: projectId,
+          model: effectiveModel,
+          requestType: 'agent',
+          userAgent: 'antigravity',
+          requestId: `agent-${crypto.randomUUID()}`,
           request: originalPayload,
         };
         body = JSON.stringify(wrappedBody);
+        logger.info(`[Antigravity] model=${rawModelName}→${effectiveModel} project=${projectId}`);
+        logger.debug(`[Antigravity] body: ${body.slice(0, 2000)}`);
       } catch { /* keep original body if parse fails */ }
     }
 
-    // Set Antigravity headers
+    // Antigravity-style headers
     const headers = new Headers(init?.headers);
     headers.delete('x-goog-api-key');
-    headers.set('Authorization', `Bearer ${token}`);
+    headers.delete('x-goog-user-project');
+    headers.set('Authorization', `Bearer ${creds.accessToken}`);
     headers.set('Content-Type', 'application/json');
-    headers.set('User-Agent', 'google-api-nodejs-client/9.15.1');
+    headers.set('User-Agent', 'antigravity/1.18.3 darwin/arm64');
     headers.set('X-Goog-Api-Client', 'google-cloud-sdk vscode_cloudshelleditor/0.1');
 
-    const response = await origFetch.call(globalThis, antigravityUrl, {
-      ...init,
-      headers,
-      body,
-    });
+    // Try endpoints in fallback order
+    let lastResponse: Response | null = null;
+    for (const endpoint of ANTIGRAVITY_FALLBACKS) {
+      const targetUrl = `${endpoint}/v1internal:${action}${isStreaming ? '?alt=sse' : ''}`;
+      logger.info(`[Antigravity] → ${action} model=${effectiveModel} endpoint=${endpoint}`);
 
-    // Unwrap Antigravity response: extract the `response` field
-    if (response.ok && !isStreaming) {
-      try {
-        const responseText = await response.text();
-        const parsed = JSON.parse(responseText);
-        if (parsed.response) {
-          return new Response(JSON.stringify(parsed.response), {
+      const response = await origFetch.call(globalThis, targetUrl, {
+        ...init,
+        headers,
+        body,
+      });
+
+      logger.info(`[Antigravity] ← ${response.status} ${response.statusText}`);
+      lastResponse = response;
+
+      // On 404, 403, or 5xx, try next endpoint
+      if (response.status === 404 || response.status === 403 || response.status >= 500) {
+        const errBody = await response.text().catch(() => '');
+        logger.warn(`[Antigravity] ${endpoint} returned ${response.status}, trying next... ${errBody.slice(0, 200)}`);
+        continue;
+      }
+
+      if (!response.ok) {
+        const errBody = await response.clone().text().catch(() => '(unreadable)');
+        logger.error(`[Antigravity] error ${response.status}: ${errBody.slice(0, 500)}`);
+        return response;
+      }
+
+      // Success — unwrap response
+      if (!isStreaming) {
+        try {
+          const responseText = await response.text();
+          const parsed = JSON.parse(responseText);
+          if (parsed.response) {
+            return new Response(JSON.stringify(parsed.response), {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers,
+            });
+          }
+          return new Response(responseText, {
             status: response.status,
             statusText: response.statusText,
             headers: response.headers,
           });
+        } catch {
+          return response;
         }
-        return new Response(responseText, {
+      }
+
+      // Streaming: unwrap SSE data lines
+      if (response.body) {
+        logger.info(`[Antigravity] streaming started from ${endpoint}`);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          async pull(controller) {
+            const { done, value } = await reader.read();
+            if (done) { controller.close(); return; }
+            let text = decoder.decode(value, { stream: true });
+            text = text.replace(/^data: (.+)$/gm, (_match, json) => {
+              try {
+                const parsed = JSON.parse(json);
+                if (parsed.response) return `data: ${JSON.stringify(parsed.response)}`;
+              } catch { /* ignore */ }
+              return _match;
+            });
+            controller.enqueue(encoder.encode(text));
+          },
+        });
+        return new Response(stream, {
           status: response.status,
           statusText: response.statusText,
           headers: response.headers,
         });
-      } catch {
-        return response;
       }
+
+      return response;
     }
 
-    // For streaming responses, transform SSE data lines to unwrap .response
-    if (response.ok && isStreaming && response.body) {
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      const encoder = new TextEncoder();
-      const stream = new ReadableStream({
-        async pull(controller) {
-          const { done, value } = await reader.read();
-          if (done) { controller.close(); return; }
-          let text = decoder.decode(value, { stream: true });
-          // Unwrap each SSE data line: "data: {response: {...}}" -> "data: {...}"
-          text = text.replace(/^data: (.+)$/gm, (_match, json) => {
-            try {
-              const parsed = JSON.parse(json);
-              if (parsed.response) return `data: ${JSON.stringify(parsed.response)}`;
-            } catch { /* ignore */ }
-            return _match;
-          });
-          controller.enqueue(encoder.encode(text));
-        },
-      });
-      return new Response(stream, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
+    // All endpoints failed — return last response
+    return lastResponse ?? new Response('All Antigravity endpoints failed', { status: 502 });
+    } catch (err) {
+      logger.error(`[Antigravity Fetch] unexpected error: ${err instanceof Error ? err.message : String(err)}`);
+      return origFetch.call(globalThis, input, init);
     }
-
-    return response;
   };
   _googleOAuthFetchInstalled = true;
 }
@@ -499,10 +812,12 @@ const MODEL_FACTORIES: Record<string, ModelFactory> = {
       // Use custom fetch to intercept requests and replace x-api-key with Bearer token,
       // matching the approach used by opencode-anthropic-auth plugin.
       // LangChain always forces apiKey into the SDK client, so we must override at fetch level.
+      // Read fresh token on each request to handle token refreshes
       const oauthFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const freshToken = getOAuthToken('anthropic') ?? oauthToken;
         const headers = new Headers(init?.headers);
         headers.delete('x-api-key');
-        headers.set('authorization', `Bearer ${oauthToken}`);
+        headers.set('authorization', `Bearer ${freshToken}`);
         headers.set('anthropic-beta', 'oauth-2025-04-20,interleaved-thinking-2025-05-14');
         headers.set('user-agent', 'claude-cli/2.1.2 (external, cli)');
 
@@ -542,7 +857,7 @@ const MODEL_FACTORIES: Record<string, ModelFactory> = {
       // The @google/generative-ai SDK always sends x-goog-api-key header.
       // For Antigravity OAuth, we need Authorization: Bearer instead.
       // Install a global fetch interceptor for googleapis.com requests.
-      installGoogleOAuthFetch(oauthToken);
+      installGoogleOAuthFetch();
       return new ChatGoogleGenerativeAI({
         model: name,
         ...opts,
