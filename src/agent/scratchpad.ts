@@ -56,7 +56,7 @@ export interface ToolUsageStatus {
 
 /** Default tool limit configuration */
 const DEFAULT_LIMIT_CONFIG: ToolLimitConfig = {
-  maxCallsPerTool: 3,
+  maxCallsPerTool: 10,
   similarityThreshold: 0.7,
 };
 
@@ -139,10 +139,9 @@ export class Scratchpad {
     if (currentCount >= maxCalls) {
       return {
         allowed: true,
-        warning: `Tool '${toolName}' has been called ${currentCount} times (suggested limit: ${maxCalls}). ` +
-          `If previous calls didn't return the needed data, consider: ` +
-          `(1) trying a different tool, (2) using different search terms, or ` +
-          `(3) proceeding with what you have and noting any data gaps to the user.`,
+        warning: `Tool '${toolName}' has been called ${currentCount} times. ` +
+          `This is fine if you are gathering different data each time (e.g., skill workflows). ` +
+          `Only stop if the tool is returning the same data repeatedly.`,
       };
     }
 
@@ -150,28 +149,15 @@ export class Scratchpad {
     if (query) {
       const previousQueries = this.toolQueries.get(toolName) ?? [];
       const similarQuery = this.findSimilarQuery(query, previousQueries);
-      
+
       if (similarQuery) {
         // Allow but warn - the LLM should know it's repeating
-        const remaining = maxCalls - currentCount;
         return {
           allowed: true,
           warning: `This query is very similar to a previous '${toolName}' call. ` +
-            `You have ${remaining} attempt(s) before reaching the suggested limit. ` +
-            `If the tool isn't returning useful results, consider: ` +
-            `(1) trying a different tool, (2) using different search terms, or ` +
-            `(3) acknowledging the data limitation to the user.`,
+            `Consider using different search terms or proceeding with the data you have.`,
         };
       }
-    }
-
-    // Check if approaching limit (1 call remaining)
-    if (currentCount === maxCalls - 1) {
-      return {
-        allowed: true,
-        warning: `You are approaching the suggested limit for '${toolName}' (${currentCount + 1}/${maxCalls}). ` +
-          `If this doesn't return the needed data, consider trying a different approach.`,
-      };
     }
 
     return { allowed: true };
@@ -231,14 +217,11 @@ export class Scratchpad {
     }
 
     const lines = statuses.map(s => {
-      const status = s.callCount >= s.maxCalls
-        ? `${s.callCount} calls (over suggested limit of ${s.maxCalls})`
-        : `${s.callCount}/${s.maxCalls} calls`;
-      return `- ${s.toolName}: ${status}`;
+      return `- ${s.toolName}: ${s.callCount} calls`;
     });
 
     return `## Tool Usage This Query\n\n${lines.join('\n')}\n\n` +
-      `Note: If a tool isn't returning useful results after several attempts, consider trying a different tool/approach.`;
+      `Note: Multiple calls to the same tool are fine when gathering different data (e.g., skill workflows). Only stop if the tool is returning duplicate results.`;
   }
 
   /**

@@ -116,8 +116,8 @@ ${toolDescriptions}
 - ALWAYS prefer financial_search over web_search for any financial data (stock prices, metrics, filings, etc.)
 - ALWAYS prefer crypto_search over web_search for any cryptocurrency or DeFi data (crypto prices, token info, TVL, yields, etc.)
 - Use financial_search for traditional equities/stocks; use crypto_search for cryptocurrency and DeFi assets
-- Call financial_search or crypto_search ONCE with the full natural language query - they handle complexity internally
-- Do NOT break up queries into multiple tool calls when one call can handle the request
+- For simple queries, call financial_search or crypto_search ONCE - they handle complexity internally
+- For skill workflows (e.g., crypto-analysis), multiple calls to the same tool are expected and encouraged - each call gathers different data
 - Use web_fetch as the DEFAULT for reading any web page content (articles, press releases, investor relations pages)
 - Only use browser when you need JavaScript rendering or interactive navigation (clicking links, filling forms, navigating SPAs)
 - For factual questions about entities (companies, people, organizations), use tools to verify current state

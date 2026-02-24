@@ -177,11 +177,23 @@ export class Agent {
     const finalPrompt = buildFinalAnswerPrompt(ctx.query, fullContext);
 
     yield { type: 'answer_start' };
-    const { response, usage } = await this.callModel(finalPrompt, false);
-    ctx.tokenCounter.add(usage);
-    const answer = typeof response === 'string'
-      ? response
-      : extractTextContent(response);
+
+    let answer: string;
+    try {
+      const { response, usage } = await this.callModel(finalPrompt, false);
+      ctx.tokenCounter.add(usage);
+      answer = typeof response === 'string'
+        ? response
+        : extractTextContent(response);
+    } catch {
+      // If final answer generation fails (e.g., rate limit), use collected tool results as fallback
+      const toolResults = ctx.scratchpad.getActiveToolResults();
+      if (toolResults.length > 0) {
+        answer = toolResults.map(r => `**${r.toolName}**\n${r.result}`).join('\n\n');
+      } else {
+        answer = options?.fallbackMessage ?? 'Failed to generate response. Please try again.';
+      }
+    }
 
     const totalTime = Date.now() - ctx.startTime;
     yield {
