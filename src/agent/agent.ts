@@ -93,6 +93,13 @@ export class Agent {
           return;
         }
 
+        // If the LLM already produced a text response, use it directly
+        // instead of making another LLM call to regenerate
+        if (responseText?.trim()) {
+          yield* this.handleDirectResponse(responseText.trim(), ctx);
+          return;
+        }
+
         // Generate final answer with full context from scratchpad
         yield* this.generateFinalAnswer(ctx);
         return;
@@ -186,7 +193,11 @@ export class Agent {
         ? response
         : extractTextContent(response);
     } catch {
-      // If final answer generation fails (e.g., rate limit), use collected tool results as fallback
+      answer = '';
+    }
+
+    // Fallback: if LLM returned empty (rate limit, null content, etc.), use raw tool data
+    if (!answer?.trim()) {
       const toolResults = ctx.scratchpad.getActiveToolResults();
       if (toolResults.length > 0) {
         answer = toolResults.map(r => `**${r.toolName}**\n${r.result}`).join('\n\n');
