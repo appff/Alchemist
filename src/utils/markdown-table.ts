@@ -7,6 +7,62 @@
 
 import chalk from 'chalk';
 
+/**
+ * Strip ANSI escape codes from a string.
+ */
+function stripAnsi(str: string): string {
+  return str
+    .replace(/\x1b\[[0-9;]*[mGKHJ]/g, '')
+    .replace(/\x1b\(B/g, '')
+    .replace(/\x1b\][^\x07]*\x07/g, '');
+}
+
+/**
+ * Calculate the visible width of a string, handling ANSI codes and CJK double-width characters.
+ */
+function visibleWidth(str: string): number {
+  const clean = stripAnsi(str);
+  let width = 0;
+  for (const char of clean) {
+    const code = char.codePointAt(0)!;
+    if (
+      (code >= 0x1100 && code <= 0x115f) || // Hangul Jamo
+      (code >= 0x2e80 && code <= 0x303e) || // CJK Radicals, Kangxi, CJK Symbols
+      (code >= 0x3040 && code <= 0x33bf) || // Hiragana, Katakana, Bopomofo
+      (code >= 0x3400 && code <= 0x4dbf) || // CJK Extension A
+      (code >= 0x4e00 && code <= 0xa4cf) || // CJK Unified Ideographs, Yi
+      (code >= 0xa960 && code <= 0xa97f) || // Hangul Jamo Extended-A
+      (code >= 0xac00 && code <= 0xd7af) || // Hangul Syllables
+      (code >= 0xd7b0 && code <= 0xd7ff) || // Hangul Jamo Extended-B
+      (code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility Ideographs
+      (code >= 0xfe30 && code <= 0xfe6f) || // CJK Compatibility Forms
+      (code >= 0xff01 && code <= 0xff60) || // Fullwidth Forms
+      (code >= 0xffe0 && code <= 0xffe6) || // Fullwidth Signs
+      (code >= 0x20000 && code <= 0x2fa1f) // CJK Extensions B-F
+    ) {
+      width += 2;
+    } else {
+      width += 1;
+    }
+  }
+  return width;
+}
+
+/**
+ * Pad a string to a target visible width.
+ */
+function padToVisibleWidth(str: string, targetWidth: number, rightAlign: boolean): string {
+  const padSize = Math.max(0, targetWidth - visibleWidth(str));
+  return rightAlign ? ' '.repeat(padSize) + str : str + ' '.repeat(padSize);
+}
+
+/**
+ * Apply bold styling to **text** markers within a cell.
+ */
+function applyBold(str: string): string {
+  return str.replace(/\*\*([^*]+)\*\*/g, (_, text) => chalk.bold(text));
+}
+
 // Box-drawing characters
 const BOX = {
   topLeft: '┌',
@@ -88,20 +144,24 @@ export function parseMarkdownTable(tableText: string): { headers: string[]; rows
  * Render a parsed table as a Unicode box-drawing table.
  */
 export function renderBoxTable(headers: string[], rows: string[][]): string {
-  // Calculate column widths
-  const colWidths: number[] = headers.map(h => h.length);
-  
-  for (const row of rows) {
+  // Apply bold styling first so width calculations use final visible widths
+  const styledHeaders = headers.map(applyBold);
+  const styledRows = rows.map(row => row.map(applyBold));
+
+  // Calculate column widths using visible width (handles ANSI codes + CJK)
+  const colWidths: number[] = styledHeaders.map(h => visibleWidth(h));
+
+  for (const row of styledRows) {
     for (let i = 0; i < row.length; i++) {
       if (i < colWidths.length) {
-        colWidths[i] = Math.max(colWidths[i], row[i].length);
+        colWidths[i] = Math.max(colWidths[i], visibleWidth(row[i]));
       }
     }
   }
-  
+
   // Determine alignment for each column (right for numeric, left for text)
   const alignRight: boolean[] = headers.map((_, colIndex) => {
-    // Check if most values in this column are numeric
+    // Check if most values in this column are numeric (use original text, not styled)
     let numericCount = 0;
     for (const row of rows) {
       if (row[colIndex] && isNumeric(row[colIndex])) {
@@ -110,53 +170,45 @@ export function renderBoxTable(headers: string[], rows: string[][]): string {
     }
     return numericCount > rows.length / 2;
   });
-  
-  // Helper to pad a cell
-  const padCell = (value: string, width: number, rightAlign: boolean): string => {
-    if (rightAlign) {
-      return value.padStart(width);
-    }
-    return value.padEnd(width);
-  };
-  
+
   // Build the table
   const lines: string[] = [];
-  
+
   // Top border
-  const topBorder = BOX.topLeft + 
-    colWidths.map(w => BOX.horizontal.repeat(w + 2)).join(BOX.topT) + 
+  const topBorder = BOX.topLeft +
+    colWidths.map(w => BOX.horizontal.repeat(w + 2)).join(BOX.topT) +
     BOX.topRight;
   lines.push(topBorder);
-  
+
   // Header row
-  const headerRow = BOX.vertical + 
-    headers.map((h, i) => ` ${padCell(h, colWidths[i], false)} `).join(BOX.vertical) + 
+  const headerRow = BOX.vertical +
+    styledHeaders.map((h, i) => ` ${padToVisibleWidth(h, colWidths[i], false)} `).join(BOX.vertical) +
     BOX.vertical;
   lines.push(headerRow);
-  
+
   // Header separator
-  const headerSep = BOX.leftT + 
-    colWidths.map(w => BOX.horizontal.repeat(w + 2)).join(BOX.cross) + 
+  const headerSep = BOX.leftT +
+    colWidths.map(w => BOX.horizontal.repeat(w + 2)).join(BOX.cross) +
     BOX.rightT;
   lines.push(headerSep);
-  
+
   // Data rows
-  for (const row of rows) {
-    const dataRow = BOX.vertical + 
+  for (const row of styledRows) {
+    const dataRow = BOX.vertical +
       colWidths.map((w, i) => {
         const value = row[i] || '';
-        return ` ${padCell(value, w, alignRight[i])} `;
-      }).join(BOX.vertical) + 
+        return ` ${padToVisibleWidth(value, w, alignRight[i])} `;
+      }).join(BOX.vertical) +
       BOX.vertical;
     lines.push(dataRow);
   }
-  
+
   // Bottom border
-  const bottomBorder = BOX.bottomLeft + 
-    colWidths.map(w => BOX.horizontal.repeat(w + 2)).join(BOX.bottomT) + 
+  const bottomBorder = BOX.bottomLeft +
+    colWidths.map(w => BOX.horizontal.repeat(w + 2)).join(BOX.bottomT) +
     BOX.bottomRight;
   lines.push(bottomBorder);
-  
+
   return lines.join('\n');
 }
 
