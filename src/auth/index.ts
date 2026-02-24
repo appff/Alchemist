@@ -21,11 +21,9 @@ export type { GoogleAuthResult } from './google-oauth.js';
 export { startCallbackServer } from './callback-server.js';
 export type { CallbackResult } from './callback-server.js';
 export {
-  startOpenAIDeviceAuth,
-  pollOpenAIToken,
+  startOpenAIOAuth,
   exchangeOpenAICode,
-  obtainOpenAIApiKey,
   refreshOpenAIToken,
-  completeOpenAIDeviceAuth,
+  OPENAI_CALLBACK_PORT,
 } from './openai-oauth.js';
-export type { OpenAIDeviceAuthResponse } from './openai-oauth.js';
+export type { OpenAIOAuthResult } from './openai-oauth.js';

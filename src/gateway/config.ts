@@ -2,28 +2,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
-import { normalizeE164 } from './utils.js';
 
 const DEFAULT_GATEWAY_PATH = join(homedir(), '.dexter', 'gateway.json');
-const DmPolicySchema = z.enum(['pairing', 'allowlist', 'open', 'disabled']);
-const GroupPolicySchema = z.enum(['open', 'allowlist', 'disabled']);
-const ReconnectSchema = z.object({
-  initialMs: z.number().optional(),
-  maxMs: z.number().optional(),
-  factor: z.number().optional(),
-  jitter: z.number().optional(),
-  maxAttempts: z.number().optional(),
-});
 
-const WhatsAppAccountSchema = z.object({
+const TelegramAccountSchema = z.object({
   name: z.string().optional(),
   enabled: z.boolean().optional().default(true),
-  authDir: z.string().optional(),
-  allowFrom: z.array(z.string()).optional().default([]),
-  dmPolicy: DmPolicySchema.optional(),
-  groupPolicy: GroupPolicySchema.optional(),
-  groupAllowFrom: z.array(z.string()).optional().default([]),
-  sendReadReceipts: z.boolean().optional().default(true),
+  botToken: z.string().optional().default(''),
+  allowedChatIds: z.array(z.number()).optional().default([]),
 });
 
 const GatewayConfigSchema = z.object({
@@ -32,16 +18,14 @@ const GatewayConfigSchema = z.object({
       accountId: z.string().optional(),
       logLevel: z.enum(['silent', 'error', 'info', 'debug']).optional(),
       heartbeatSeconds: z.number().optional(),
-      reconnect: ReconnectSchema.optional(),
     })
     .optional(),
   channels: z
     .object({
-      whatsapp: z
+      telegram: z
         .object({
           enabled: z.boolean().optional(),
-          accounts: z.record(z.string(), WhatsAppAccountSchema).optional(),
-          allowFrom: z.array(z.string()).optional(),
+          accounts: z.record(z.string(), TelegramAccountSchema).optional(),
         })
         .optional(),
     })
@@ -67,19 +51,11 @@ export type GatewayConfig = {
     accountId: string;
     logLevel: 'silent' | 'error' | 'info' | 'debug';
     heartbeatSeconds?: number;
-    reconnect?: {
-      initialMs?: number;
-      maxMs?: number;
-      factor?: number;
-      jitter?: number;
-      maxAttempts?: number;
-    };
   };
   channels: {
-    whatsapp: {
+    telegram: {
       enabled: boolean;
-      accounts: Record<string, z.infer<typeof WhatsAppAccountSchema>>;
-      allowFrom: string[];
+      accounts: Record<string, z.infer<typeof TelegramAccountSchema>>;
     };
   };
   bindings: Array<{
@@ -92,16 +68,13 @@ export type GatewayConfig = {
     };
   }>;
 };
-export type WhatsAppAccountConfig = {
+
+export type TelegramAccountConfig = {
   accountId: string;
   name?: string;
   enabled: boolean;
-  authDir: string;
-  allowFrom: string[];
-  dmPolicy: 'pairing' | 'allowlist' | 'open' | 'disabled';
-  groupPolicy: 'open' | 'allowlist' | 'disabled';
-  groupAllowFrom: string[];
-  sendReadReceipts: boolean;
+  botToken: string;
+  allowedChatIds: number[];
 };
 
 export function getGatewayConfigPath(overridePath?: string): string {
@@ -110,31 +83,50 @@ export function getGatewayConfigPath(overridePath?: string): string {
 
 export function loadGatewayConfig(overridePath?: string): GatewayConfig {
   const path = getGatewayConfigPath(overridePath);
-  if (!existsSync(path)) {
-    return {
-      gateway: { accountId: 'default', logLevel: 'info' },
-      channels: { whatsapp: { enabled: true, accounts: {}, allowFrom: [] } },
-      bindings: [],
-    };
+
+  // Start with defaults
+  let fileConfig: z.infer<typeof GatewayConfigSchema> | undefined;
+  if (existsSync(path)) {
+    const raw = readFileSync(path, 'utf8');
+    fileConfig = GatewayConfigSchema.parse(JSON.parse(raw));
   }
-  const raw = readFileSync(path, 'utf8');
-  const parsed = GatewayConfigSchema.parse(JSON.parse(raw));
+
+  // Env vars override file config for token and chat IDs
+  const envToken = process.env.TELEGRAM_BOT_TOKEN ?? '';
+  const envChatIds = (process.env.TELEGRAM_CHAT_ID ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter(n => !isNaN(n));
+
+  const fileAccounts = fileConfig?.channels?.telegram?.accounts ?? {};
+
+  // If env token is set, ensure the default account uses it
+  if (envToken) {
+    if (!fileAccounts['default']) {
+      fileAccounts['default'] = { enabled: true, botToken: envToken, allowedChatIds: envChatIds };
+    } else {
+      fileAccounts['default'].botToken = envToken;
+      if (envChatIds.length > 0) {
+        fileAccounts['default'].allowedChatIds = envChatIds;
+      }
+    }
+  }
+
   return {
-    ...parsed,
     gateway: {
-      accountId: parsed.gateway?.accountId ?? 'default',
-      logLevel: parsed.gateway?.logLevel ?? 'info',
-      heartbeatSeconds: parsed.gateway?.heartbeatSeconds,
-      reconnect: parsed.gateway?.reconnect,
+      accountId: fileConfig?.gateway?.accountId ?? 'default',
+      logLevel: fileConfig?.gateway?.logLevel ?? 'info',
+      heartbeatSeconds: fileConfig?.gateway?.heartbeatSeconds,
     },
     channels: {
-      whatsapp: {
-        enabled: parsed.channels?.whatsapp?.enabled ?? true,
-        accounts: parsed.channels?.whatsapp?.accounts ?? {},
-        allowFrom: parsed.channels?.whatsapp?.allowFrom ?? [],
+      telegram: {
+        enabled: fileConfig?.channels?.telegram?.enabled ?? true,
+        accounts: fileAccounts,
       },
     },
-    bindings: parsed.bindings ?? [],
+    bindings: fileConfig?.bindings ?? [],
   };
 }
 
@@ -147,37 +139,22 @@ export function saveGatewayConfig(config: GatewayConfig, overridePath?: string):
   writeFileSync(path, JSON.stringify(config, null, 2), 'utf8');
 }
 
-export function listWhatsAppAccountIds(cfg: GatewayConfig): string[] {
-  const accounts = cfg.channels.whatsapp.accounts ?? {};
+export function listTelegramAccountIds(cfg: GatewayConfig): string[] {
+  const accounts = cfg.channels.telegram.accounts ?? {};
   const ids = Object.keys(accounts);
   return ids.length > 0 ? ids : [cfg.gateway.accountId];
 }
 
-export function resolveWhatsAppAccount(
+export function resolveTelegramAccount(
   cfg: GatewayConfig,
   accountId: string,
-): WhatsAppAccountConfig {
-  const account = cfg.channels.whatsapp.accounts?.[accountId] ?? {};
-  const authDir = account.authDir ?? join(homedir(), '.dexter', 'credentials', 'whatsapp', accountId);
-  const rawAllowFrom = account.allowFrom ?? cfg.channels.whatsapp.allowFrom ?? [];
-  const allowFrom = Array.from(
-    new Set(
-      rawAllowFrom
-        .map((entry) => entry.trim())
-        .filter(Boolean)
-        .map((entry) => (entry === '*' ? '*' : normalizeE164(entry))),
-    ),
-  );
+): TelegramAccountConfig {
+  const account = cfg.channels.telegram.accounts?.[accountId] ?? {};
   return {
     accountId,
     enabled: account.enabled ?? true,
     name: account.name,
-    authDir,
-    allowFrom,
-    dmPolicy: account.dmPolicy ?? 'pairing',
-    groupPolicy: account.groupPolicy ?? 'disabled',
-    groupAllowFrom: account.groupAllowFrom ?? [],
-    sendReadReceipts: account.sendReadReceipts ?? true,
+    botToken: account.botToken ?? process.env.TELEGRAM_BOT_TOKEN ?? '',
+    allowedChatIds: account.allowedChatIds ?? [],
   };
 }
-

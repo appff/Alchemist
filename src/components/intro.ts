@@ -3,7 +3,7 @@ import packageJson from '../../package.json';
 import { getModelDisplayName } from '../utils/model.js';
 import { theme } from '../theme.js';
 
-const INTRO_WIDTH = 50;
+const INTRO_WIDTH = 56;
 
 export class IntroComponent extends Container {
   private readonly modelText: Text;
@@ -11,7 +11,7 @@ export class IntroComponent extends Container {
   constructor(model: string) {
     super();
 
-    const welcomeText = 'Welcome to Dexter';
+    const welcomeText = 'Welcome to Alchemist';
     const versionText = ` v${packageJson.version}`;
     const fullText = welcomeText + versionText;
     const padding = Math.floor((INTRO_WIDTH - fullText.length - 2) / 2);
@@ -38,12 +38,12 @@ export class IntroComponent extends Container {
         theme.bold(
           theme.primary(
             `
-██████╗ ███████╗██╗  ██╗████████╗███████╗██████╗ 
-██╔══██╗██╔════╝╚██╗██╔╝╚══██╔══╝██╔════╝██╔══██╗
-██║  ██║█████╗   ╚███╔╝    ██║   █████╗  ██████╔╝
-██║  ██║██╔══╝   ██╔██╗    ██║   ██╔══╝  ██╔══██╗
-██████╔╝███████╗██╔╝ ██╗   ██║   ███████╗██║  ██║
-╚═════╝ ╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝`,
+ █████╗ ██╗      ██████╗██╗  ██╗███████╗███╗   ███╗██╗███████╗████████╗
+██╔══██╗██║     ██╔════╝██║  ██║██╔════╝████╗ ████║██║██╔════╝╚══██╔══╝
+███████║██║     ██║     ███████║█████╗  ██╔████╔██║██║███████╗   ██║
+██╔══██║██║     ██║     ██╔══██║██╔══╝  ██║╚██╔╝██║██║╚════██║   ██║
+██║  ██║███████╗╚██████╗██║  ██║███████╗██║ ╚═╝ ██║██║███████║   ██║
+╚═╝  ╚═╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝╚══════╝   ╚═╝`,
           ),
         ),
         0,
@@ -52,7 +52,7 @@ export class IntroComponent extends Container {
     );
 
     this.addChild(new Spacer(1));
-    this.addChild(new Text('Your AI assistant for deep financial research.', 0, 0));
+    this.addChild(new Text('Your AI assistant for financial research & portfolio management.', 0, 0));
     this.modelText = new Text('', 0, 0);
     this.addChild(this.modelText);
     this.setModel(model);

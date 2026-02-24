@@ -117,6 +117,260 @@ function getOAuthToken(provider: 'anthropic' | 'google' | 'openai'): string | nu
   return creds.accessToken;
 }
 
+/**
+ * Decode a JWT and extract the ChatGPT account ID from the OpenAI OAuth token.
+ * The claim lives at `["https://api.openai.com/auth"]["chatgpt_account_id"]`.
+ */
+function extractChatGPTAccountId(token: string): string | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return null;
+    const payload = JSON.parse(
+      Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString(),
+    );
+    const authClaim = payload?.['https://api.openai.com/auth'];
+    return authClaim?.chatgpt_account_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+const CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
+
+/**
+ * Extract path + search from a URL string.
+ * Matching guard22/opencode-multi-auth-codex approach.
+ */
+function extractPathAndSearch(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.pathname}${u.search}`;
+  } catch {
+    const trimmed = String(url || '').trim();
+    if (trimmed.startsWith('/')) return trimmed;
+    const firstSlash = trimmed.indexOf('/');
+    if (firstSlash >= 0) return trimmed.slice(firstSlash);
+    return trimmed;
+  }
+}
+
+/**
+ * Rewrite URL path: /responses → /codex/responses, /chat/completions → /codex/chat/completions.
+ * Matching guard22/opencode-multi-auth-codex approach.
+ */
+function toCodexBackendUrl(originalUrl: string): string {
+  let mapped = extractPathAndSearch(originalUrl);
+  if (mapped.includes('/responses')) {
+    mapped = mapped.replace('/responses', '/codex/responses');
+  } else if (mapped.includes('/chat/completions')) {
+    mapped = mapped.replace('/chat/completions', '/codex/chat/completions');
+  }
+  return new URL(mapped, CODEX_BASE_URL).toString();
+}
+
+/**
+ * Parse SSE stream text and extract the final response from response.done or response.completed.
+ * Matching guard22/opencode-multi-auth-codex approach.
+ */
+function parseSseStream(sseText: string): unknown | null {
+  const lines = sseText.split('\n');
+  for (const line of lines) {
+    if (!line.startsWith('data: ')) continue;
+    try {
+      const data = JSON.parse(line.substring(6)) as { type?: string; response?: unknown };
+      if (data?.type === 'response.done' || data?.type === 'response.completed') {
+        return data.response;
+      }
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
+/**
+ * Filter a single SSE line: keep only valid SSE protocol lines and data events
+ * that are NOT ChatGPT backend error/metadata events.
+ */
+function isCleanSseLine(trimmed: string): boolean {
+  if (trimmed === '') return true; // SSE delimiters
+  if (trimmed.startsWith('event:')) return true;
+  if (trimmed.startsWith('id:')) return true;
+  if (trimmed.startsWith('retry:')) return true;
+  if (trimmed.startsWith('data:')) {
+    // Filter out data lines containing ChatGPT backend error events
+    const jsonStr = trimmed.substring(trimmed.indexOf(':') + 1).trim();
+    try {
+      const parsed = JSON.parse(jsonStr);
+      // Drop error events from the ChatGPT backend
+      if (parsed?.type === 'error' || parsed?.error) return false;
+    } catch {
+      // Non-JSON data line — might be "[DONE]" which is valid, or garbage
+      if (jsonStr === '[DONE]') return true;
+      return false; // Drop unparseable data lines (trace metadata etc.)
+    }
+    return true;
+  }
+  // Drop everything else (Context: trace=..., raw error text, etc.)
+  return false;
+}
+
+/**
+ * Create a custom fetch for ChatGPT backend API routing.
+ * Matches guard22/opencode-multi-auth-codex and numman-ali/opencode-openai-codex-auth.
+ */
+function createChatGPTFetch(token: string, accountId: string) {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const rawUrl =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
+
+    // Rewrite URL path to codex backend endpoint
+    const targetUrl = toCodexBackendUrl(rawUrl);
+
+    // Parse request body — handle both JSON strings and non-string types (FormData, Blob, etc.)
+    let payload: Record<string, unknown> = {};
+    if (init?.body) {
+      if (typeof init.body === 'string') {
+        try { payload = JSON.parse(init.body); } catch { payload = {}; }
+      } else if (init.body instanceof ArrayBuffer || ArrayBuffer.isView(init.body)) {
+        try { payload = JSON.parse(new TextDecoder().decode(init.body as ArrayBuffer)); } catch { payload = {}; }
+      }
+      // FormData / Blob / ReadableStream — can't reliably parse, use empty payload
+      // The ChatGPT backend requires JSON, so this is a best-effort approach.
+    }
+
+    // If parsing failed and payload is empty (no model/input), skip this request
+    // This prevents sending empty payloads that the ChatGPT backend would reject
+    if (!payload.model && !payload.input) {
+      // Passthrough to original endpoint (will likely fail, but avoids confusing 403s)
+      return globalThis.fetch(input, init);
+    }
+
+    const isStreaming = payload?.stream === true;
+
+    // Transform payload: ChatGPT backend always requires stream: true and store: false
+    payload.store = false;
+    payload.stream = true;
+
+    // ChatGPT /codex/responses requires a top-level `instructions` field.
+    // LangChain puts the system prompt in `input` as role:"developer" or role:"system".
+    // Extract it and move to `instructions`.
+    if (!payload.instructions && Array.isArray(payload.input)) {
+      const inputArr = payload.input as Array<Record<string, unknown>>;
+      const sysIdx = inputArr.findIndex(
+        (m) => m.role === 'developer' || m.role === 'system',
+      );
+      if (sysIdx !== -1) {
+        const sysMsg = inputArr[sysIdx];
+        payload.instructions = typeof sysMsg.content === 'string'
+          ? sysMsg.content
+          : JSON.stringify(sysMsg.content);
+        // Remove from input array
+        inputArr.splice(sysIdx, 1);
+        payload.input = inputArr;
+      }
+    }
+
+    // Build headers matching guard22/opencode-multi-auth-codex exactly
+    const headers = new Headers(init?.headers || {});
+    headers.delete('x-api-key');                      // Remove SDK's API key header
+    headers.set('Content-Type', 'application/json');   // Force JSON (prevent multipart)
+    headers.set('Authorization', `Bearer ${token}`);
+    headers.set('chatgpt-account-id', accountId);
+    headers.set('OpenAI-Beta', 'responses=experimental');
+    headers.set('originator', 'codex_cli_rs');
+    headers.set('accept', 'text/event-stream');
+
+    const body = JSON.stringify(payload);
+
+    const res = await globalThis.fetch(targetUrl, {
+      method: init?.method ?? 'POST',
+      headers,
+      body,
+      signal: init?.signal,
+    });
+
+    if (!res.ok) {
+      // Return a clean error response with proper JSON format for the SDK
+      const errText = await res.text().catch(() => '');
+      const cleanError = JSON.stringify({
+        error: {
+          message: `ChatGPT backend error (${res.status})`,
+          type: 'api_error',
+          code: String(res.status),
+        },
+      });
+      return new Response(cleanError, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+      });
+    }
+
+    // Always filter SSE — ChatGPT backend always returns SSE since we force stream: true
+    if (res.body) {
+      if (isStreaming) {
+        // Streaming: filter and pass through SSE stream
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          async pull(controller) {
+            const { done, value } = await reader.read();
+            if (done) { controller.close(); return; }
+            const text = decoder.decode(value, { stream: true });
+            const filtered = text.split('\n')
+              .filter((line) => isCleanSseLine(line.trim()))
+              .join('\n');
+            if (filtered) {
+              controller.enqueue(encoder.encode(filtered));
+            }
+          },
+        });
+        const responseHeaders = new Headers(res.headers);
+        if (!responseHeaders.has('content-type')) {
+          responseHeaders.set('content-type', 'text/event-stream; charset=utf-8');
+        }
+        return new Response(stream, {
+          status: res.status,
+          statusText: res.statusText,
+          headers: responseHeaders,
+        });
+      }
+
+      // Non-streaming: read all SSE and extract final response as JSON
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let fullText = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        fullText += decoder.decode(value, { stream: true });
+      }
+
+      const finalResponse = parseSseStream(fullText);
+      if (finalResponse) {
+        return new Response(JSON.stringify(finalResponse), {
+          status: res.status,
+          statusText: res.statusText,
+          headers: new Headers({ 'content-type': 'application/json; charset=utf-8' }),
+        });
+      }
+
+      // Fallback: return raw text with JSON content-type to avoid SDK parsing issues
+      return new Response(fullText, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: new Headers({ 'content-type': 'text/plain; charset=utf-8' }),
+      });
+    }
+
+    return res;
+  };
+}
+
 // Global fetch interceptor for Google OAuth via Antigravity (Gemini Code Assist).
 // The @google/generative-ai SDK sends requests to generativelanguage.googleapis.com
 // with an x-goog-api-key header. Antigravity OAuth tokens don't work with that API.
@@ -160,7 +414,7 @@ function installGoogleOAuthFetch(token: string) {
       try {
         const originalPayload = JSON.parse(body);
         const wrappedBody = {
-          project: 'dexter-cli',
+          project: 'alchemist-cli',
           model: modelName,
           request: originalPayload,
         };
@@ -301,6 +555,30 @@ const MODEL_FACTORIES: Record<string, ModelFactory> = {
       apiKey: getApiKey('GOOGLE_API_KEY'),
     });
   },
+  openai: (name, opts) => {
+    const oauthToken = getOAuthToken('openai');
+    if (oauthToken) {
+      const accountId = extractChatGPTAccountId(oauthToken);
+      if (accountId) {
+        return new ChatOpenAI({
+          model: name,
+          ...opts,
+          apiKey: 'chatgpt-oauth',
+          useResponsesApi: true,
+          configuration: {
+            baseURL: CODEX_BASE_URL,
+            fetch: createChatGPTFetch(oauthToken, accountId),
+          },
+        });
+      }
+    }
+    // Fallback: standard OpenAI API with env key
+    return new ChatOpenAI({
+      model: name,
+      ...opts,
+      apiKey: oauthToken ?? getApiKey('OPENAI_API_KEY'),
+    });
+  },
   xai: (name, opts) =>
     new ChatOpenAI({
       model: name,
@@ -346,7 +624,10 @@ const MODEL_FACTORIES: Record<string, ModelFactory> = {
 };
 
 const DEFAULT_FACTORY: ModelFactory = (name, opts) => {
-  // Check OAuth credentials first, then fall back to env API key
+  // Use the openai factory if available (handles ChatGPT backend routing)
+  const openaiFactory = MODEL_FACTORIES['openai'];
+  if (openaiFactory) return openaiFactory(name, opts);
+
   const oauthToken = getOAuthToken('openai');
   return new ChatOpenAI({
     model: name,

@@ -2,18 +2,18 @@ import type { EditorTheme, MarkdownTheme, SelectListTheme } from '@mariozechner/
 import chalk from 'chalk';
 
 const palette = {
-  primary: '#258bff',
-  primaryLight: '#a5cfff',
+  primary: '#2ecc71',
+  primaryLight: '#a3e4b8',
   success: 'green',
   error: 'red',
   warning: 'yellow',
   muted: '#a6a6a6',
-  mutedDark: '#303030',
+  mutedDark: '#555555',
   accent: 'cyan',
   white: '#ffffff',
-  info: '#6CB6FF',
+  info: '#6ecf8a',
   queryBg: '#3D3D3D',
-  border: '#303030',
+  border: '#555555',
 };
 
 const fg = (color: string) => (text: string) => chalk.hex(color)(text);

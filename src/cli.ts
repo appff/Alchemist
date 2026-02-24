@@ -1,3 +1,13 @@
+// Disable LangSmith tracing unless a valid API key is explicitly configured.
+// Without this, placeholder keys in .env cause background 403 errors that leak into the TUI.
+if (
+  !process.env.LANGSMITH_API_KEY ||
+  process.env.LANGSMITH_API_KEY === 'your-api-key' ||
+  process.env.LANGSMITH_API_KEY.trim() === ''
+) {
+  process.env.LANGSMITH_TRACING = 'false';
+}
+
 import { Container, ProcessTerminal, Spacer, Text, TUI, CombinedAutocompleteProvider, type SlashCommand } from '@mariozechner/pi-tui';
 import type {
   AgentEvent,
@@ -181,6 +191,7 @@ export async function runCli() {
 
   const modelSelection = new ModelSelectionController(onError, () => {
     intro.setModel(modelSelection.model);
+    agentRunner.setModel(modelSelection.model, modelSelection.provider);
     renderSelectionOverlay();
     tui.requestRender();
   });
@@ -211,7 +222,7 @@ export async function runCli() {
     { name: 'model', description: 'Switch LLM provider and model' },
     { name: 'auth', description: 'Authenticate with a provider' },
     { name: 'auth logout', description: 'Clear stored credentials' },
-    { name: 'exit', description: 'Exit Dexter' },
+    { name: 'exit', description: 'Exit Alchemist' },
     ...discoverSkills().map(skill => ({
       name: skill.name,
       description: skill.description,
@@ -389,7 +400,7 @@ export async function runCli() {
       return;
     }
 
-    if (authState === 'oauth_waiting' || authState === 'device_auth_waiting') {
+    if (authState === 'oauth_waiting') {
       const messageText = new Text(theme.info(authController.getMessage()), 0, 0);
       renderScreenView(
         'Waiting for authentication',

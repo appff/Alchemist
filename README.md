@@ -17,7 +17,7 @@ Extended fork of [virattt/dexter](https://github.com/virattt/dexter).
 - [LLM Providers](#llm-providers)
 - [Skills & Tools](#skills--tools)
 - [Slash Commands](#slash-commands)
-- [WhatsApp Gateway](#whatsapp-gateway)
+- [Telegram Gateway](#telegram-gateway)
 - [Evaluation & Debugging](#evaluation--debugging)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
@@ -37,7 +37,7 @@ Built on top of [Dexter](https://github.com/virattt/dexter), Alchemist extends t
 - **Crypto and DeFi Analysis** -- CoinGecko, DeFiLlama, and Etherscan integration for token prices, protocol metrics, TVL, on-chain data, and technical indicators.
 - **Portfolio Management** -- Fund-manager-grade tracking with tax-lot accounting, FIFO/LIFO/HIFO lot selection, rebalancing strategies, risk metrics (Sharpe, Sortino, VaR), and dividend analysis.
 - **Enhanced Terminal UI** -- pi-tui based interface with streaming output, slash command autocomplete, box-drawing table rendering, and CJK character support.
-- **WhatsApp Gateway** -- Chat with the agent via WhatsApp using the Baileys library, with access control and session persistence.
+- **Telegram Gateway** -- Chat with the agent via Telegram Bot using the grammy library, with slash command support, access control, and session persistence.
 
 ---
 
@@ -96,7 +96,7 @@ The agent emits typed events in real time (`tool_start`, `tool_progress`, `tool_
 - **Portfolio Management** -- Tax-lot tracking with FIFO/LIFO/HIFO, rebalancing with drift detection, risk metrics (beta, Sharpe, Sortino, VaR), benchmark comparison, and dividend analysis.
 - **Multi-LLM Support** -- 8 providers with hot-swap via `/model`, OAuth for OpenAI/Anthropic/Google, and prompt caching for cost reduction.
 - **Extensible Skill System** -- Create custom SKILL.md workflows with YAML frontmatter and markdown steps, discovered automatically at runtime.
-- **WhatsApp Integration** -- Message the agent via WhatsApp with access control, typing indicators, and session persistence.
+- **Telegram Integration** -- Message the agent via Telegram with slash commands, typing indicators, access control, and session persistence.
 - **Safety Features** -- Loop detection, configurable step limits, tool approval prompts for write operations, and abort signal support.
 
 ---
@@ -139,6 +139,7 @@ cp env.example .env
 | **Stock Market** | `FINANCIAL_DATASETS_API_KEY` | For equity analysis |
 | **Web Search** | `EXASEARCH_API_KEY`, `PERPLEXITY_API_KEY`, `TAVILY_API_KEY` | At least one for search |
 | **Crypto** | `COINGECKO_API_KEY`, `ETHERSCAN_API_KEY` | Optional (free tiers work) |
+| **Telegram** | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | For Telegram gateway |
 | **Observability** | `LANGSMITH_API_KEY`, `LANGSMITH_ENDPOINT`, `LANGSMITH_PROJECT` | Optional |
 
 > See [`env.example`](env.example) for the full reference with comments.
@@ -305,18 +306,35 @@ Skills in `.dexter/skills/` (project-level) override `~/.dexter/skills/` (user-l
 
 ---
 
-## WhatsApp Gateway
+## Telegram Gateway
 
-Alchemist can be accessed via WhatsApp as a chat gateway:
+Alchemist can be accessed via Telegram Bot:
 
-```bash
-bun run gateway:login   # Link your WhatsApp account (scan QR code)
-bun run gateway         # Start the gateway server
-```
+### Setup
 
-Once linked, send messages to the connected WhatsApp number to interact with Alchemist.
+1. Create a bot via [@BotFather](https://t.me/BotFather) on Telegram and get your bot token
+2. Add the token to your `.env` file:
+   ```bash
+   TELEGRAM_BOT_TOKEN=your-bot-token-from-botfather
+   TELEGRAM_CHAT_ID=your-chat-id   # Optional: comma-separated chat IDs to restrict access
+   ```
+3. Start the gateway:
+   ```bash
+   bun run gateway
+   ```
 
-For detailed setup instructions, see the [WhatsApp Gateway README](src/gateway/channels/whatsapp/README.md).
+### Features
+
+- **Slash commands** -- All TUI skills are automatically registered as Telegram bot commands (`/portfolio`, `/dcf-valuation`, `/crypto-analysis`)
+- **Natural language** -- Send any question in plain text
+- **Typing indicators** -- Shows typing status while the agent works
+- **Access control** -- Restrict to specific chat IDs via `TELEGRAM_CHAT_ID` environment variable (empty = allow all)
+- **Session persistence** -- Conversation context is maintained per chat
+- **Long message handling** -- Automatically splits responses exceeding Telegram's 4096-character limit
+
+### Usage
+
+Once the gateway is running, open Telegram and message your bot. Use `/start` to see available commands, or type any question directly.
 
 ---
 
@@ -353,11 +371,13 @@ Keep PRs small and focused. One feature or fix per PR.
 
 ## Acknowledgments
 
-- Built on [Dexter](https://github.com/virattt/dexter) by [@virattt](https://twitter.com/virattt)
-- Extended with skills system, multi-LLM support, crypto analysis, and portfolio management
+- Built on [Dexter](https://github.com/virattt/dexter) by [@virattt](https://twitter.com/virattt), licensed under the [MIT License](https://github.com/virattt/dexter/blob/main/LICENSE)
+- Extended with skill system, multi-LLM support, crypto analysis, portfolio management, and Telegram gateway
 
 ---
 
 ## License
 
-This project is licensed under the MIT License.
+This project is licensed under the MIT License -- see the [LICENSE](LICENSE) file for details.
+
+This project is a derivative work of [Dexter](https://github.com/virattt/dexter) by [@virattt](https://twitter.com/virattt), which is also licensed under the MIT License. The original license and copyright notice are preserved as required.

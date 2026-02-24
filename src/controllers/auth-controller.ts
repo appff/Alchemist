@@ -9,22 +9,20 @@ export type AuthState =
   | 'oauth_waiting'
   | 'code_input'
   | 'api_key_input'
-  | 'device_auth_waiting'
   | 'complete'
   | 'error';
 
 type AuthChangeListener = () => void;
 
 /** Auth flow type for a given provider */
-type AuthFlowType = 'oauth' | 'device' | 'api_key';
+type AuthFlowType = 'oauth' | 'api_key';
 
 function getAuthFlowType(providerId: string): AuthFlowType {
   switch (providerId) {
     case 'anthropic':
     case 'google':
-      return 'oauth';
     case 'openai':
-      return 'device';
+      return 'oauth';
     default:
       return 'api_key';
   }
@@ -51,8 +49,6 @@ export class AuthController {
   private selectedProviderValue: string | null = null;
   private readonly onError: (message: string) => void;
   private readonly onChange?: AuthChangeListener;
-  private devicePollTimer: ReturnType<typeof setInterval> | null = null;
-  private devicePollAborted = false;
   private oauthVerifier: string | null = null;
 
   constructor(onError: (message: string) => void, onChange?: AuthChangeListener) {
@@ -99,9 +95,6 @@ export class AuthController {
     switch (flowType) {
       case 'oauth':
         this.startOAuthFlow(providerId);
-        break;
-      case 'device':
-        this.startDeviceAuthFlow(providerId);
         break;
       case 'api_key':
         this.stateValue = 'api_key_input';
@@ -176,7 +169,6 @@ export class AuthController {
   }
 
   cancelAuthFlow(): void {
-    this.stopDevicePoll();
     this.resetState();
   }
 
@@ -194,6 +186,8 @@ export class AuthController {
     try {
       if (providerId === 'google') {
         await this.beginGoogleOAuth(providerId);
+      } else if (providerId === 'openai') {
+        await this.beginOpenAIOAuth(providerId);
       } else {
         await this.beginAnthropicOAuth(providerId);
       }
@@ -242,6 +236,45 @@ export class AuthController {
     }
   }
 
+  private async beginOpenAIOAuth(providerId: string): Promise<void> {
+    const {
+      startOpenAIOAuth,
+      exchangeOpenAICode,
+      saveCredentials,
+      OPENAI_CALLBACK_PORT,
+    } = await import('../auth/index.js');
+    const { startCallbackServer } = await import('../auth/callback-server.js');
+
+    const { url, verifier, state } = await startOpenAIOAuth();
+
+    this.stateValue = 'oauth_waiting';
+    this.messageValue = 'Browser opened. Waiting for OpenAI authorization...';
+    this.emitChange();
+
+    openUrl(url);
+
+    try {
+      const { code } = await startCallbackServer(OPENAI_CALLBACK_PORT);
+      const { accessToken, refreshToken, expiresIn } = await exchangeOpenAICode(code, verifier);
+
+      saveCredentials('openai', {
+        provider: 'openai',
+        accessToken,
+        refreshToken,
+        expiresAt: Date.now() + (expiresIn ?? 3600) * 1000,
+      });
+
+      const provider = PROVIDERS.find((p) => p.id === providerId);
+      this.stateValue = 'complete';
+      this.messageValue = `Authenticated with ${provider?.displayName ?? providerId} successfully.`;
+      this.emitChange();
+      setTimeout(() => this.resetState(), 1500);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'OpenAI OAuth failed.';
+      this.setError(msg);
+    }
+  }
+
   private async exchangeOAuthCode(providerId: string, code: string): Promise<void> {
     try {
       const authModule = await import('../auth/index.js');
@@ -271,65 +304,6 @@ export class AuthController {
     }
   }
 
-  private startDeviceAuthFlow(_providerId: string): void {
-    void this.beginDeviceAuth(_providerId);
-  }
-
-  private async beginDeviceAuth(providerId: string): Promise<void> {
-    try {
-      if (providerId === 'openai') {
-        await this.beginOpenAIDeviceAuth(providerId);
-      } else {
-        // Fallback: should not reach here since Google now uses OAuth flow
-        this.stateValue = 'api_key_input';
-        this.messageValue = 'Enter your API key:';
-        this.emitChange();
-      }
-    } catch {
-      // Auth module not available - fall back to API key
-      this.stateValue = 'api_key_input';
-      this.messageValue = 'Device auth not available. Enter your API key instead:';
-      this.emitChange();
-    }
-  }
-
-  private async beginOpenAIDeviceAuth(providerId: string): Promise<void> {
-    const { startOpenAIDeviceAuth, completeOpenAIDeviceAuth } = await import('../auth/index.js');
-    const { verificationUrl, userCode, deviceAuthId, interval } =
-      await startOpenAIDeviceAuth();
-
-    this.stateValue = 'device_auth_waiting';
-    this.messageValue = `Go to ${verificationUrl} and enter code: ${userCode}`;
-    this.devicePollAborted = false;
-    this.emitChange();
-
-    openUrl(verificationUrl);
-
-    try {
-      const creds = await completeOpenAIDeviceAuth(deviceAuthId, userCode, interval);
-      if (this.devicePollAborted) return;
-      if (creds.accessToken) {
-        const provider = PROVIDERS.find((p) => p.id === providerId);
-        this.stateValue = 'complete';
-        this.messageValue = `Authenticated with ${provider?.displayName ?? providerId} successfully.`;
-        this.emitChange();
-        setTimeout(() => this.resetState(), 1500);
-      }
-    } catch (pollErr) {
-      if (this.devicePollAborted) return;
-      const msg = pollErr instanceof Error ? pollErr.message : 'Device auth polling failed.';
-      this.setError(msg);
-    }
-  }
-
-  private stopDevicePoll(): void {
-    this.devicePollAborted = true;
-    if (this.devicePollTimer) {
-      clearInterval(this.devicePollTimer);
-      this.devicePollTimer = null;
-    }
-  }
-
   private setError(message: string): void {
     this.stateValue = 'error';
     this.messageValue = message;
@@ -341,12 +315,10 @@ export class AuthController {
   }
 
   private resetState(): void {
-    this.stopDevicePoll();
     this.stateValue = 'idle';
     this.messageValue = '';
     this.selectedProviderValue = null;
     this.oauthVerifier = null;
-    this.devicePollAborted = false;
     this.emitChange();
   }
 

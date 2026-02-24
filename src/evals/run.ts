@@ -1,5 +1,5 @@
 /**
- * LangSmith Evaluation Runner for Dexter
+ * LangSmith Evaluation Runner for Alchemist
  * 
  * Usage:
  *   bun run src/evals/run.ts              # Run on all questions
@@ -232,8 +232,8 @@ function createEvaluationRunner(sampleSize?: number) {
 
     // Create a unique dataset name for this run (sampling creates different datasets)
     const datasetName = sampleSize 
-      ? `dexter-finance-eval-sample-${sampleSize}-${Date.now()}`
-      : 'dexter-finance-eval';
+      ? `alchemist-finance-eval-sample-${sampleSize}-${Date.now()}`
+      : 'alchemist-finance-eval';
 
     // Yield init event
     yield {
@@ -270,7 +270,7 @@ function createEvaluationRunner(sampleSize?: number) {
     }
 
     // Generate experiment name for tracking
-    const experimentName = `dexter-eval-${Date.now().toString(36)}`;
+    const experimentName = `alchemist-eval-${Date.now().toString(36)}`;
 
     // Run evaluation manually - process each example one by one
     for (const example of examples) {

@@ -50,7 +50,7 @@ ${skillList}
 /**
  * Default system prompt used when no specific prompt is provided.
  */
-export const DEFAULT_SYSTEM_PROMPT = `You are Dexter, a helpful AI assistant.
+export const DEFAULT_SYSTEM_PROMPT = `You are Alchemist, a helpful AI assistant.
 
 Current date: ${getCurrentDate()}
 
@@ -100,7 +100,7 @@ Keep tables compact:
 export function buildSystemPrompt(model: string): string {
   const toolDescriptions = buildToolDescriptions(model);
 
-  return `You are Dexter, a CLI assistant with access to research tools.
+  return `You are Alchemist, a CLI assistant with access to research tools.
 
 Current date: ${getCurrentDate()}
 
