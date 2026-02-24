@@ -3,9 +3,10 @@ name: portfolio
 description: >
   Comprehensive portfolio tracking and rebalancing system with fund-manager grade analytics.
   Triggers when user asks about portfolio management, holdings, performance tracking, rebalancing,
-  risk analysis, tax-loss harvesting, "/portfolio" commands, asset allocation, or investment
-  portfolio operations. Supports multiple portfolios stored as markdown files with full transaction
-  history, tax-lot tracking, and professional-grade metrics.
+  risk analysis, tax-loss harvesting, "/portfolio" commands, asset allocation, goal-based investing,
+  financial goals, goal tracking, glide path, "/portfolio goal", or investment portfolio operations.
+  Supports multiple portfolios stored as markdown files with full transaction history, tax-lot
+  tracking, goal-based planning, and professional-grade metrics.
 ---
 
 # Portfolio Management Skill
@@ -33,6 +34,11 @@ Parse the user's intent and route to the appropriate workflow:
 | `/portfolio dividend` or "dividend income" | Workflow H: Dividend Analysis |
 | `/portfolio compare` or "compare to benchmark" | Workflow J: Benchmark Comparison |
 | `/portfolio allocation` or "asset allocation" | Workflow K: Allocation Analysis |
+| `/portfolio goal new` or "set a financial goal" | Workflow L: Goal Initialization |
+| `/portfolio goal [name]` or "how is my goal going" | Workflow M: Goal Progress Tracking |
+| `/portfolio goals` or "show all my goals" | Workflow M: All Goals Overview |
+| `/portfolio rebalance --goal [name]` | Workflow N: Goal-Based Rebalancing |
+| `/portfolio goal plan [name]` or "goal planning" | Workflow O: Goal Planning |
 
 **Natural language triggers (Korean):**
 - "내 포트폴리오 보여줘" → Workflow A
@@ -41,6 +47,11 @@ Parse the user's intent and route to the appropriate workflow:
 - "새 포트폴리오 만들어줘" → Workflow I
 - "포트폴리오 성과 분석해줘" → Workflow D
 - "리밸런싱 해야 하나?" → Workflow E
+- "은퇴 목표 만들어줘" → Workflow L
+- "내 목표 진행 상황 보여줘" → Workflow M
+- "목표 기반으로 리밸런싱 해줘" → Workflow N
+- "목표 달성 계획 분석해줘" → Workflow O
+- "내 모든 목표 보여줘" → Workflow M (all)
 
 ---
 
@@ -69,6 +80,7 @@ tax_type: taxable
 | `rebalance_strategy` | enum | N | threshold / calendar / band (default: threshold) |
 | `rebalance_threshold` | number | N | Drift tolerance % (default: 5) |
 | `tax_type` | enum | Y | taxable / tax-deferred / tax-free |
+| `goals` | list | N | Linked goal names (e.g., [retirement, education]) |
 
 ### Holdings Table
 
@@ -107,6 +119,64 @@ tax_type: taxable
 
 ---
 
+## Goal File Schema
+
+Goal files are stored in `~/.dexter/portfolios/goals/{name}.md`.
+
+### YAML Frontmatter
+
+```yaml
+---
+name: retirement
+type: retirement
+target_amount: 2000000
+target_date: 2045-06-01
+annual_return_target: 8.5
+monthly_contribution: 2000
+risk_tolerance: aggressive
+horizon: long
+linked_portfolios: [main, retirement-ira]
+allocation_template: aggressive-long
+currency: USD
+created: 2026-02-24
+---
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Y | Goal identifier (lowercase, no spaces) |
+| `type` | enum | Y | retirement / education / home / emergency / travel / general |
+| `target_amount` | number | Y | Target dollar amount |
+| `target_date` | date | Y | Target completion date (YYYY-MM-DD) |
+| `annual_return_target` | number | N | Required annual return % (auto-calculated) |
+| `monthly_contribution` | number | N | Planned monthly contribution (default: 0) |
+| `risk_tolerance` | enum | Y | conservative / moderate / aggressive |
+| `horizon` | enum | N | short / medium / long (auto-derived from target_date) |
+| `linked_portfolios` | list | Y | Portfolio names funding this goal |
+| `allocation_template` | string | N | Template from goal-templates.md (auto-selected) |
+| `currency` | string | N | Currency (default: USD) |
+| `created` | date | Y | Creation date |
+
+### Progress History Table
+
+| Column | Description |
+|--------|-------------|
+| Date | Snapshot date (YYYY-MM-DD) |
+| Portfolio Value | Combined value of linked portfolios |
+| Cumulative Contributions | Total contributions to date |
+| On Track | Yes / At Risk / Behind |
+
+### Milestones Table
+
+| Column | Description |
+|--------|-------------|
+| Target % | Milestone percentage (25%, 50%, 75%, 100%) |
+| Amount | Dollar amount for this milestone |
+| Date Reached | Date milestone was reached (empty if not yet) |
+| Notes | Auto-generated or user notes |
+
+---
+
 ## Workflow I: Initialize Portfolio
 
 ### Checklist
@@ -127,6 +197,7 @@ Ask the user for (provide sensible defaults):
 - **Currency** (default: USD)
 - **Benchmark** (default: SPY)
 - **Rebalancing strategy** (default: threshold at 5%)
+- **Link to goal** (optional): If the user mentions a goal (e.g., "for my retirement goal"), link this portfolio to that goal
 
 If the user doesn't specify, use defaults and proceed.
 
@@ -183,6 +254,7 @@ created: {TODAY_DATE}
 rebalance_strategy: {STRATEGY}
 rebalance_threshold: {THRESHOLD}
 tax_type: {TAX_TYPE}
+goals: [{GOAL_NAME_IF_LINKED}]
 ---
 
 # {Portfolio Name}
@@ -306,6 +378,17 @@ For each portfolio:
 - **Number of Positions**: count of unique tickers
 - **Largest Position**: ticker with highest market value and its % of total
 
+### Step 4.5: Goal Progress Summary (Optional)
+
+If `~/.dexter/portfolios/goals/` directory exists and contains goal files:
+
+1. Read each goal file
+2. For each goal, calculate:
+   - **Current value**: SUM(market value of linked portfolios)
+   - **Progress %**: current_value / target_amount × 100
+   - **Status**: On Track / At Risk / Behind (from most recent Progress History entry, or calculate via Workflow M logic)
+3. Include a Goal Progress section in the output
+
 ### Step 5: Output Format
 
 ```
@@ -320,6 +403,12 @@ Portfolio Summary (as of {DATE})
 
 ────────────────────────────────────────
 Combined Total: $XXX,XXX    Total P&L: +$XX,XXX (+XX.X%)
+
+{If goals exist:}
+═══ Goal Progress ═══
+  Goal            Target         Current     Progress   Status      Target Date
+  retirement      $2,000,000     $485,000    24.3%      On Track    2045-06-01
+  education       $200,000       $45,000     22.5%      At Risk     2035-09-01
 ```
 
 If only one portfolio exists, also show the full holdings breakdown:
@@ -664,6 +753,14 @@ Period: {CREATED_DATE} to {TODAY} ({DAYS} days)
   Alternatives       X.X%     +XX.X%    +X.X%          OK
   Cash               X.X%     +X.X%     +X.X%          OK
 
+{If portfolio is linked to a goal:}
+═══ Goal Trajectory ═══
+  Goal: {GOAL_NAME}  |  Target: ${TARGET}  |  Deadline: {TARGET_DATE}
+  Required Annual Return:  {X.X}%
+  Actual Annual Return:    {X.X}%  ({ABOVE/BELOW} target by {X.X}%)
+  Projected Value at Deadline: ${XXX,XXX} (base case)
+  Status: {On Track / At Risk / Behind}
+
 ═══ Holdings Detail ═══
   Ticker   Shares   Avg Cost    Current    Value        P&L              Weight
   AAPL     80       $163.41     $192.30    $15,384      +$2,311 (+17.7%) 22.1%
@@ -988,6 +1085,8 @@ Rebalancing Progress:
 ```
 
 ### Step 1: Read Portfolio, Targets, and Current Prices
+
+**Goal-based routing**: If the user includes `--goal [name]` or mentions "goal-based rebalancing", route to **Workflow N: Goal-Based Rebalancing** instead.
 
 Read the portfolio file with `read_file`.
 Parse: Holdings table, Target Allocation table, YAML frontmatter (rebalance_strategy, rebalance_threshold, tax_type).
@@ -1856,6 +1955,521 @@ Dividend projections are estimates based on current yields and may change.
 
 ---
 
+## Workflow L: Goal Initialization
+
+### Checklist
+```
+Goal Initialization Progress:
+- [ ] Step 1: Gather goal information from user
+- [ ] Step 2: Calculate required return and horizon
+- [ ] Step 3: Select allocation template
+- [ ] Step 4: Create goal file
+- [ ] Step 5: Link portfolios
+- [ ] Step 6: Update config
+- [ ] Step 7: Confirm creation
+```
+
+### Step 1: Gather Goal Information
+
+Ask the user for:
+- **Goal name** (required): lowercase identifier (e.g., "retirement", "education", "house")
+- **Goal type** (required): retirement / education / home / emergency / travel / general
+- **Target amount** (required): Dollar amount (e.g., $2,000,000)
+- **Target date** (required): YYYY-MM-DD (e.g., 2045-06-01)
+- **Monthly contribution** (optional, default: 0): Planned monthly savings toward this goal
+- **Risk tolerance** (optional): conservative / moderate / aggressive — if not specified, use Goal Type Defaults from [goal-templates.md](goal-templates.md)
+- **Linked portfolios** (optional): Which portfolio(s) fund this goal — default to `default_portfolio` from config.md
+
+### Step 2: Calculate Required Return and Horizon
+
+**Derive horizon:**
+```
+years_remaining = (target_date - today) / 365
+if years_remaining < 3  → horizon = short
+if 3 ≤ years_remaining ≤ 10 → horizon = medium
+if years_remaining > 10 → horizon = long
+```
+
+**Calculate current portfolio value** for linked portfolios:
+- Read each linked portfolio file
+- Fetch current prices for all holdings
+- current_value = SUM(market values across all linked portfolios)
+
+**Calculate required annual return:**
+
+If monthly_contribution = 0:
+```
+r = (target_amount / current_value) ^ (1 / years_remaining) - 1
+```
+
+If monthly_contribution > 0 (use bisection method):
+```
+Find r such that:
+FV = current_value × (1+r)^n + monthly_contribution × 12 × ((1+r)^n - 1) / r = target_amount
+where n = years_remaining
+
+Bisection: search r in [0, 0.50] for 20 iterations
+```
+
+**Warning**: If required return > 15%, warn the user:
+"⚠ Required annual return of {r}% is very aggressive. Consider increasing contributions, extending the timeline, or reducing the target."
+
+### Step 3: Select Allocation Template
+
+Using the derived `horizon` and user's `risk_tolerance`, look up the template from [goal-templates.md](goal-templates.md):
+
+1. Read the Template Selection Matrix
+2. Select the matching template (e.g., moderate-long)
+3. If risk_tolerance not specified, use Goal Type Defaults table
+
+Present the selected template to the user:
+```
+Selected template: {template_name}
+  Based on: {horizon} horizon ({years_remaining} years) × {risk_tolerance} risk
+
+  Asset Class          Target %
+  US Equity            XX%
+  International Equity XX%
+  Fixed Income         XX%
+  ...
+
+  Expected annual return: X–X%
+  Required annual return: X.X%
+```
+
+If required return exceeds the template's expected return range, suggest:
+- A more aggressive template, OR
+- Increasing monthly contributions, OR
+- Extending the target date
+
+### Step 4: Create Goal File
+
+Use `write_file` to create `~/.dexter/portfolios/goals/{name}.md`:
+
+```markdown
+---
+name: {name}
+type: {type}
+target_amount: {amount}
+target_date: {date}
+annual_return_target: {calculated_r}
+monthly_contribution: {contribution}
+risk_tolerance: {tolerance}
+horizon: {horizon}
+linked_portfolios: [{portfolio_names}]
+allocation_template: {template_name}
+currency: USD
+created: {TODAY_DATE}
+---
+
+# Goal: {Name}
+
+## Target Allocation
+
+| Asset Class | Target % |
+|-------------|----------|
+{ALLOCATION_ROWS from selected template}
+
+## Progress History
+
+| Date | Portfolio Value | Cumulative Contributions | On Track |
+|------|----------------|-------------------------|----------|
+| {TODAY_DATE} | ${current_value} | $0 | {status} |
+
+## Milestones
+
+| Target % | Amount | Date Reached | Notes |
+|----------|--------|-------------|-------|
+| 25% | ${target × 0.25} | | |
+| 50% | ${target × 0.50} | | |
+| 75% | ${target × 0.75} | | |
+| 100% | ${target} | | |
+
+## Notes
+
+```
+
+If `~/.dexter/portfolios/goals/` directory does not exist, create it first.
+
+### Step 5: Link Portfolios
+
+For each linked portfolio:
+1. Read the portfolio file
+2. If the YAML frontmatter has a `goals` field, append the new goal name
+3. If no `goals` field exists, add `goals: [{name}]`
+4. Use `edit_file` to update the portfolio file
+
+### Step 6: Update Config
+
+Read `~/.dexter/portfolios/config.md`.
+If config does not have a `## Goals` section, add one:
+
+```markdown
+## Goals
+
+| Goal | Type | Target | Target Date | Status |
+|------|------|--------|-------------|--------|
+| {name} | {type} | ${target} | {date} | Active |
+```
+
+If it already has a `## Goals` section, add a new row.
+
+### Step 7: Confirm
+
+```
+Created goal: {name}
+  Type: {type} | Target: ${target_amount} | Deadline: {target_date}
+  Horizon: {horizon} ({years_remaining} years)
+  Risk: {risk_tolerance} | Template: {template_name}
+  Required Return: {r}% | Expected Return: {expected_range}%
+  Monthly Contribution: ${contribution}
+  Linked Portfolios: {portfolio_names}
+  Location: ~/.dexter/portfolios/goals/{name}.md
+
+  Next: Track progress with "/portfolio goal {name}"
+        View all goals with "/portfolio goals"
+```
+
+---
+
+## Workflow M: Goal Progress Tracking
+
+### Checklist
+```
+Goal Progress Tracking:
+- [ ] Step 1: Read goal file(s)
+- [ ] Step 2: Fetch portfolio values and current prices
+- [ ] Step 3: Calculate progress metrics
+- [ ] Step 4: Project future value (3 scenarios)
+- [ ] Step 5: Determine status
+- [ ] Step 6: Present dashboard and update Progress History
+```
+
+### Step 1: Read Goal File(s)
+
+**Single goal**: If user specifies a goal name (`/portfolio goal retirement`), read `~/.dexter/portfolios/goals/{name}.md`.
+
+**All goals**: If user says `/portfolio goals` or "show all my goals", list all `.md` files in `~/.dexter/portfolios/goals/` and read each one.
+
+If goal file not found: "Goal '{name}' not found. Create one with `/portfolio goal new`."
+If goals directory is empty: "No goals set up yet. Create one with `/portfolio goal new`."
+
+### Step 2: Fetch Portfolio Values and Current Prices
+
+For each goal's `linked_portfolios`:
+1. Read each portfolio file
+2. Fetch current prices for all holdings (stocks via `financial_search`, crypto via `crypto_search`)
+3. Calculate total market value across all linked portfolios
+
+Also extract:
+- Total cost basis across linked portfolios
+- Total contributions from goal's Progress History table
+
+### Step 3: Calculate Progress Metrics
+
+```
+current_value = SUM(market values of linked portfolios)
+progress_pct = current_value / target_amount × 100
+remaining = target_amount - current_value
+years_remaining = (target_date - today) / 365
+monthly_contribution = from goal YAML
+cumulative_contributions = SUM(monthly_contribution × months since created) + initial_value
+investment_return = current_value - cumulative_contributions
+```
+
+### Step 4: Project Future Value (3 Scenarios)
+
+Using the future value formula with annuity:
+```
+FV = PV × (1+r)^n + PMT × ((1+r)^n - 1) / r
+where:
+  PV = current_value
+  PMT = monthly_contribution × 12 (annualized)
+  n = years_remaining
+  r = annual return rate
+```
+
+Calculate three scenarios:
+
+| Scenario | Annual Return | Description |
+|----------|--------------|-------------|
+| Optimistic | annual_return_target + 2% | Above-target performance |
+| Base | annual_return_target | Expected performance |
+| Pessimistic | annual_return_target - 3% (min 1%) | Below-target performance |
+
+### Step 5: Determine Status
+
+```
+if base_FV >= target_amount → "On Track" ✅
+if pessimistic_FV < target_amount AND base_FV >= target_amount → "At Risk" ⚠️
+if base_FV < target_amount → "Behind" ❌
+```
+
+### Step 6: Output and Update
+
+**Single Goal Dashboard:**
+```
+Goal Progress: {NAME}
+Type: {type} | Created: {created}
+
+═══ Progress ═══
+  Target:        ${target_amount}         Deadline: {target_date}
+  Current Value: ${current_value}         Progress: {progress_pct}%
+  Remaining:     ${remaining}             Time Left: {years} years {months} months
+
+  ░░░░░░░░░░░░░░░░████████░░░░░░░░░░  {progress_pct}%
+
+  Contributions:     ${cumulative_contributions}
+  Investment Return: ${investment_return} ({return_pct}%)
+
+═══ Projection ═══
+  Scenario        Return    Projected FV       vs Target
+  Optimistic      {r+2}%    ${optimistic_FV}   {+/-}${diff}
+  Base            {r}%      ${base_FV}         {+/-}${diff}
+  Pessimistic     {r-3}%    ${pessimistic_FV}  {+/-}${diff}
+
+  Status: {On Track ✅ / At Risk ⚠️ / Behind ❌}
+  {If At Risk or Behind: specific recommendation}
+
+═══ Milestones ═══
+  25%: ${amount}  {✅ reached on DATE / ⬜ not yet}
+  50%: ${amount}  {✅ reached on DATE / ⬜ not yet}
+  75%: ${amount}  {⬜ not yet}
+  100%: ${amount} {⬜ not yet}
+
+Past performance does not guarantee future results. This is not investment advice.
+```
+
+**All Goals Overview:**
+```
+My Financial Goals
+
+  Goal            Type         Target         Current     Progress   Status      Deadline
+  retirement      retirement   $2,000,000     $485,000    24.3%      On Track    2045-06-01
+  education       education    $200,000       $45,000     22.5%      At Risk     2035-09-01
+  emergency       emergency    $50,000        $48,500     97.0%      On Track    2027-01-01
+
+  Combined Target: $2,250,000    Combined Current: $578,500 (25.7%)
+```
+
+**Update Progress History**: After display, append a new row to the goal file's Progress History table:
+```
+| {TODAY_DATE} | ${current_value} | ${cumulative_contributions} | {status} |
+```
+Use `edit_file` to add the row. Only add one entry per day (check if today's date already exists).
+
+**Update Milestones**: If progress has crossed a milestone threshold, fill in the Date Reached column.
+
+---
+
+## Workflow N: Goal-Based Rebalancing
+
+### Checklist
+```
+Goal-Based Rebalancing Progress:
+- [ ] Step 1: Read goal and portfolio files
+- [ ] Step 2: Apply glide path rules
+- [ ] Step 3: Compare current allocation to adjusted target
+- [ ] Step 4: Generate rebalancing trades
+- [ ] Step 5: Assess tax impact
+- [ ] Step 6: Present recommendation
+```
+
+### Step 1: Read Goal and Portfolio Files
+
+Parse the goal name from `--goal [name]` or user intent.
+Read `~/.dexter/portfolios/goals/{name}.md`.
+Read all linked portfolio files.
+Fetch current prices for all holdings.
+
+### Step 2: Apply Glide Path Rules
+
+Read glide path rules from [goal-templates.md](goal-templates.md).
+
+1. Calculate `years_remaining = (target_date - today) / 365`
+2. Determine the adjusted template based on glide path:
+
+| Years Remaining | Action |
+|-----------------|--------|
+| > 10 | Keep current template |
+| 7–10 | Shift one risk level down |
+| 3–7 | Shift to medium-term at same or lower risk |
+| 1–3 | Shift to conservative-short |
+| < 1 | Capital preservation mode |
+
+3. If template changed, note the transition
+
+### Step 3: Compare Current Allocation to Adjusted Target
+
+For each asset class in the adjusted template:
+```
+current_value = SUM(holdings in this class across all linked portfolios)
+current_weight = current_value / total_value × 100
+target_weight = from adjusted template
+drift = current_weight - target_weight
+```
+
+### Step 4: Generate Rebalancing Trades
+
+Same logic as Workflow E Step 4, but using the goal's adjusted template targets instead of the portfolio's own target allocation.
+
+For OVERWEIGHT classes → generate SELL trades (tax-optimized lot selection)
+For UNDERWEIGHT classes → generate BUY trades (suggest default ETFs)
+
+### Step 5: Assess Tax Impact
+
+Same as Workflow E Step 5 — calculate realized gains/losses and tax estimates for proposed sells.
+
+### Step 6: Output Format
+
+```
+Goal-Based Rebalancing: {GOAL_NAME}
+Goal: ${target_amount} by {target_date} ({years_remaining} years remaining)
+Total Portfolio Value: ${total_value}
+
+═══ Glide Path Assessment ═══
+  Current Template:  {current_template}
+  Adjusted Template: {adjusted_template}  {(no change) or (→ shifted from X)}
+  Reason: {years_remaining} years remaining — {rule description}
+
+═══ Current vs Adjusted Target Allocation ═══
+
+  Asset Class          Current    Target    Drift     Status
+  US Equity            XX.X%      XX%       {+/-}X%   {OK/OVER/UNDER}
+  International Equity XX.X%      XX%       {+/-}X%   {OK/OVER/UNDER}
+  Fixed Income         XX.X%      XX%       {+/-}X%   {OK/OVER/UNDER}
+  ...
+
+═══ Recommended Trades ═══
+
+  Action   Ticker   Shares   Est. Value    Lot         Tax Impact
+  SELL     {TICKER} {N}      ${VALUE}      {LOT}       {tax info}
+  BUY      {TICKER} {N}      ${VALUE}      (new/add)   N/A
+  ...
+
+═══ Tax Summary ═══
+
+  Realized Gains:  ${amount}
+  Realized Losses: ${amount}
+  Net Taxable:     ${amount}
+  Estimated Tax:   ${amount}
+
+═══ Post-Rebalance Allocation ═══
+
+  Asset Class          Before     After      Target
+  ...
+
+Note: Glide path transitions are recommendations. Review before executing.
+Past performance does not guarantee future results. This is not investment advice.
+```
+
+---
+
+## Workflow O: Goal Planning
+
+### Checklist
+```
+Goal Planning Progress:
+- [ ] Step 1: Read goal file and current status
+- [ ] Step 2: Calculate required monthly contribution
+- [ ] Step 3: Generate year-by-year projection
+- [ ] Step 4: Provide adjustment recommendations
+- [ ] Step 5: Present planning report
+```
+
+### Step 1: Read Goal and Current Status
+
+Read `~/.dexter/portfolios/goals/{name}.md`.
+Read linked portfolio files and fetch current prices.
+Calculate current_value, years_remaining, progress_pct.
+
+### Step 2: Calculate Required Monthly Contribution
+
+If the user's current trajectory is off-track, calculate what monthly contribution would be needed:
+
+```
+PMT_monthly = [(target_amount - current_value × (1+r)^n) × r / ((1+r)^n - 1)] / 12
+where:
+  r = annual_return_target (from goal YAML)
+  n = years_remaining
+```
+
+Also calculate for alternative scenarios:
+- **Current pace**: What target amount is achievable with current contributions + expected return
+- **Increased contributions**: Various contribution levels to hit the target
+- **Extended timeline**: How much longer would be needed at current pace
+
+### Step 3: Generate Year-by-Year Projection
+
+Create a projection table showing each year from now to the target date:
+
+```
+Year    Start Value   Contributions   Return    End Value    Progress    Template
+2026    $485,000      $24,000         $40,800   $549,800     27.5%       aggressive-long
+2027    $549,800      $24,000         $45,900   $619,700     31.0%       aggressive-long
+...
+2038    ...           ...             ...       ...          ...         moderate-medium  ← glide path shift
+...
+2044    ...           ...             ...       ...          ...         conservative-short
+2045    ...           ...             ...       $2,050,000   102.5%      conservative-short ✅
+```
+
+Include glide path transitions in the projection (mark years where template shifts).
+
+### Step 4: Provide Adjustment Recommendations
+
+Based on the analysis, provide actionable recommendations:
+
+If **On Track**:
+- "Your goal is on track. Continue current strategy."
+- Show when each milestone will be reached
+
+If **At Risk**:
+- Option A: Increase monthly contribution by $X
+- Option B: Extend target date by Y months
+- Option C: Accept higher risk (if not already aggressive)
+
+If **Behind**:
+- Combination of above options
+- Revised realistic target with current trajectory
+
+### Step 5: Output Format
+
+```
+Goal Planning Report: {GOAL_NAME}
+Type: {type} | Target: ${target_amount} | Deadline: {target_date}
+Current Value: ${current_value} | Progress: {progress_pct}%
+
+═══ Contribution Analysis ═══
+  Current monthly contribution:    ${current}
+  Required monthly contribution:   ${required}   ({shortfall_or_surplus})
+  {If shortfall: "Increase by ${diff}/month to stay on track"}
+
+═══ Scenario Analysis ═══
+  Scenario                    Monthly     Projected FV    Hit Target?
+  Current pace                ${current}  ${FV}           {Yes/No}
+  Required to hit target      ${required} ${target}       Yes
+  Moderate increase (+25%)    ${mod}      ${FV}           {Yes/No}
+
+═══ Year-by-Year Projection ═══
+  Year   Start       Contrib    Return     End         Progress  Template
+  {rows as described above}
+
+═══ Glide Path Preview ═══
+  Year    Template Change
+  {YEAR}  {current} → {new} (reason)
+  {YEAR}  {current} → {new} (reason)
+  ...
+
+═══ Recommendations ═══
+  {Ranked actionable suggestions}
+
+Past performance does not guarantee future results. This is not investment advice.
+Projections are based on assumed returns and may not reflect actual results.
+```
+
+---
+
 ## Error Handling
 
 - **Portfolio file not found**: Suggest `/portfolio init`
@@ -1866,6 +2480,12 @@ Dividend projections are estimates based on current yields and may change.
 - **Duplicate lot ID**: Auto-increment to next available
 - **Sell more than available**: Report available shares and ask to confirm
 - **Config file missing**: Create with defaults on first portfolio operation
+- **Goal file not found**: "Goal '{name}' not found. See all goals with `/portfolio goals` or create one with `/portfolio goal new`."
+- **Goals directory does not exist**: Create `~/.dexter/portfolios/goals/` automatically when first goal is created
+- **Duplicate goal name**: "A goal named '{name}' already exists. Choose a different name or view it with `/portfolio goal {name}`."
+- **Linked portfolio not found**: "Portfolio '{name}' not found. Create it first with `/portfolio init {name}`."
+- **Target date in the past**: "Target date {date} has already passed. Please set a future date."
+- **Target already achieved**: If current_value >= target_amount, congratulate and suggest: "🎉 Goal '{name}' has been achieved! Current value ${current} exceeds target ${target}. Consider setting a new goal or preserving gains."
 
 ## Important Notes
 
@@ -1876,3 +2496,8 @@ Dividend projections are estimates based on current yields and may change.
 - Dates must always be YYYY-MM-DD format
 - Tax analysis disclaimer: "This analysis is for informational purposes only and does not constitute tax advice. Consult a qualified tax professional."
 - Investment disclaimer: "Past performance does not guarantee future results. This is not investment advice."
+- When editing goal files, always use `edit_file` to preserve existing Progress History data
+- Glide path transitions are suggestions only — always present to user for confirmation before executing trades
+- Progress History is append-only — never overwrite or delete historical entries
+- Goal projections assume constant returns and contributions — real results will vary
+- Goal-based features do not constitute financial planning advice — recommend consulting a qualified financial advisor
