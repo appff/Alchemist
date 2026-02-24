@@ -1,5 +1,7 @@
 import { Container, Input, SelectList, Text, type SelectItem, getEditorKeybindings } from '@mariozechner/pi-tui';
 import { PROVIDERS, type Model } from '../utils/model.js';
+import { PROVIDERS as PROVIDER_DEFS } from '@/providers';
+import { checkApiKeyExistsForProvider } from '../utils/env.js';
 import type { ApprovalDecision } from '../agent/types.js';
 import { selectListTheme, theme } from '../theme.js';
 
@@ -93,6 +95,29 @@ export function createApiKeyConfirmSelector(onConfirm: (wantsToSet: boolean) => 
   const list = new VimSelectList(items, 4, selectListTheme);
   list.onSelect = (item) => onConfirm(item.value === 'yes');
   list.onCancel = () => onConfirm(false);
+  return list;
+}
+
+export function createAuthProviderSelector(
+  onSelect: (providerId: string | null) => void,
+) {
+  const authLabels: Record<string, string> = {
+    anthropic: 'Anthropic (Claude) - OAuth',
+    google: 'Google (Gemini) - OAuth device flow',
+  };
+  const items: SelectItem[] = PROVIDER_DEFS
+    .filter((p) => p.apiKeyEnvVar)
+    .map((provider, index) => {
+      const authenticated = checkApiKeyExistsForProvider(provider.id);
+      const label = authLabels[provider.id] ?? `${provider.displayName} - API key`;
+      return {
+        value: provider.id,
+        label: `${index + 1}. ${label}${authenticated ? ' (authenticated)' : ''}`,
+      };
+    });
+  const list = new VimSelectList(items, 8, selectListTheme);
+  list.onSelect = (item) => onSelect(item.value);
+  list.onCancel = () => onSelect(null);
   return list;
 }
 

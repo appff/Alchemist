@@ -13,6 +13,13 @@ import { DEFAULT_SYSTEM_PROMPT } from '@/agent/prompts';
 import type { TokenUsage } from '@/agent/types';
 import { logger } from '@/utils';
 import { resolveProvider, getProviderById } from '@/providers';
+import {
+  hasValidCredentials,
+  loadCredentials,
+  refreshAnthropicToken,
+  refreshGoogleToken,
+  refreshOpenAIToken,
+} from '@/auth';
 
 export const DEFAULT_PROVIDER = 'openai';
 export const DEFAULT_MODEL = 'gpt-5.2';
@@ -34,6 +41,11 @@ async function withRetry<T>(fn: () => Promise<T>, provider: string, maxAttempts 
       const message = e instanceof Error ? e.message : String(e);
       logger.error(`[${provider} API] error (attempt ${attempt + 1}/${maxAttempts}): ${message}`);
 
+      // Auto-refresh OAuth tokens on 401 errors
+      if (message.includes('401') || message.includes('Unauthorized')) {
+        await tryRefreshOAuthToken(provider);
+      }
+
       if (attempt === maxAttempts - 1) {
         throw new Error(`[${provider} API] ${message}`);
       }
@@ -41,6 +53,32 @@ async function withRetry<T>(fn: () => Promise<T>, provider: string, maxAttempts 
     }
   }
   throw new Error('Unreachable');
+}
+
+async function tryRefreshOAuthToken(providerName: string): Promise<void> {
+  try {
+    if (providerName === 'Anthropic' || providerName === 'anthropic') {
+      const creds = loadCredentials('anthropic');
+      if (creds?.refreshToken) {
+        logger.info('[OAuth] Refreshing Anthropic token...');
+        await refreshAnthropicToken(creds.refreshToken);
+      }
+    } else if (providerName === 'Google' || providerName === 'google') {
+      const creds = loadCredentials('google');
+      if (creds?.refreshToken) {
+        logger.info('[OAuth] Refreshing Google token...');
+        await refreshGoogleToken(creds.refreshToken);
+      }
+    } else if (providerName === 'OpenAI' || providerName === 'openai') {
+      const creds = loadCredentials('openai');
+      if (creds?.refreshToken) {
+        logger.info('[OAuth] Refreshing OpenAI token...');
+        await refreshOpenAIToken(creds.refreshToken);
+      }
+    }
+  } catch (refreshErr) {
+    logger.error(`[OAuth] Token refresh failed: ${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}`);
+  }
 }
 
 // Model provider configuration
@@ -58,20 +96,211 @@ function getApiKey(envVar: string): string {
   return apiKey;
 }
 
+/**
+ * Returns a valid OAuth access token for the given provider,
+ * auto-refreshing if the token has expired. Returns null if
+ * no OAuth credentials are available.
+ */
+function getOAuthToken(provider: 'anthropic' | 'google' | 'openai'): string | null {
+  if (!hasValidCredentials(provider)) return null;
+  const creds = loadCredentials(provider);
+  if (!creds) return null;
+
+  // If token is expired (with 60s buffer), refresh synchronously is not possible.
+  // Instead, we return the current token and let the SDK handle 401s,
+  // or we can eagerly refresh if we detect expiry. For simplicity, the
+  // refresh is done lazily — callers that hit 401 should trigger a refresh.
+  // However, we CAN do a sync check and log a warning.
+  if (creds.expiresAt < Date.now() - 60_000) {
+    logger.warn(`[OAuth] ${provider} token expired — will attempt refresh on next retry`);
+  }
+  return creds.accessToken;
+}
+
+// Global fetch interceptor for Google OAuth via Antigravity (Gemini Code Assist).
+// The @google/generative-ai SDK sends requests to generativelanguage.googleapis.com
+// with an x-goog-api-key header. Antigravity OAuth tokens don't work with that API.
+// Instead, we redirect requests to the Cloud Code Assist API (cloudcode-pa.googleapis.com)
+// wrapping the request body in the Antigravity format, matching opencode-antigravity-auth.
+const ANTIGRAVITY_ENDPOINT = 'https://cloudcode-pa.googleapis.com';
+let _googleOAuthFetchInstalled = false;
+function installGoogleOAuthFetch(token: string) {
+  if (_googleOAuthFetchInstalled) return;
+  const origFetch = globalThis.fetch;
+  (globalThis as Record<string, unknown>).fetch = async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
+
+    if (!url.includes('generativelanguage.googleapis.com')) {
+      return origFetch.call(globalThis, input, init);
+    }
+
+    // Extract model name and action from the URL
+    // Format: .../v1beta/models/{model}:{action}
+    const match = url.match(/\/models\/([^:?]+):(\w+)/);
+    if (!match) {
+      return origFetch.call(globalThis, input, init);
+    }
+    const [, modelName, action] = match;
+    const isStreaming = action === 'streamGenerateContent';
+
+    // Build Antigravity endpoint URL
+    const antigravityUrl = `${ANTIGRAVITY_ENDPOINT}/v1internal:${action}${isStreaming ? '?alt=sse' : ''}`;
+
+    // Wrap request body in Antigravity format
+    let body = init?.body;
+    if (typeof body === 'string') {
+      try {
+        const originalPayload = JSON.parse(body);
+        const wrappedBody = {
+          project: 'dexter-cli',
+          model: modelName,
+          request: originalPayload,
+        };
+        body = JSON.stringify(wrappedBody);
+      } catch { /* keep original body if parse fails */ }
+    }
+
+    // Set Antigravity headers
+    const headers = new Headers(init?.headers);
+    headers.delete('x-goog-api-key');
+    headers.set('Authorization', `Bearer ${token}`);
+    headers.set('Content-Type', 'application/json');
+    headers.set('User-Agent', 'google-api-nodejs-client/9.15.1');
+    headers.set('X-Goog-Api-Client', 'google-cloud-sdk vscode_cloudshelleditor/0.1');
+
+    const response = await origFetch.call(globalThis, antigravityUrl, {
+      ...init,
+      headers,
+      body,
+    });
+
+    // Unwrap Antigravity response: extract the `response` field
+    if (response.ok && !isStreaming) {
+      try {
+        const responseText = await response.text();
+        const parsed = JSON.parse(responseText);
+        if (parsed.response) {
+          return new Response(JSON.stringify(parsed.response), {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          });
+        }
+        return new Response(responseText, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      } catch {
+        return response;
+      }
+    }
+
+    // For streaming responses, transform SSE data lines to unwrap .response
+    if (response.ok && isStreaming && response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async pull(controller) {
+          const { done, value } = await reader.read();
+          if (done) { controller.close(); return; }
+          let text = decoder.decode(value, { stream: true });
+          // Unwrap each SSE data line: "data: {response: {...}}" -> "data: {...}"
+          text = text.replace(/^data: (.+)$/gm, (_match, json) => {
+            try {
+              const parsed = JSON.parse(json);
+              if (parsed.response) return `data: ${JSON.stringify(parsed.response)}`;
+            } catch { /* ignore */ }
+            return _match;
+          });
+          controller.enqueue(encoder.encode(text));
+        },
+      });
+      return new Response(stream, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    }
+
+    return response;
+  };
+  _googleOAuthFetchInstalled = true;
+}
+
 // Factories keyed by provider id — prefix routing is handled by resolveProvider()
 const MODEL_FACTORIES: Record<string, ModelFactory> = {
-  anthropic: (name, opts) =>
-    new ChatAnthropic({
+  anthropic: (name, opts) => {
+    const oauthToken = getOAuthToken('anthropic');
+    if (oauthToken) {
+      // Use custom fetch to intercept requests and replace x-api-key with Bearer token,
+      // matching the approach used by opencode-anthropic-auth plugin.
+      // LangChain always forces apiKey into the SDK client, so we must override at fetch level.
+      const oauthFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        headers.delete('x-api-key');
+        headers.set('authorization', `Bearer ${oauthToken}`);
+        headers.set('anthropic-beta', 'oauth-2025-04-20,interleaved-thinking-2025-05-14');
+        headers.set('user-agent', 'claude-cli/2.1.2 (external, cli)');
+
+        // Add ?beta=true to /v1/messages requests (required for OAuth)
+        let requestInput = input;
+        try {
+          const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
+          const url = new URL(urlStr);
+          if (url.pathname === '/v1/messages' && !url.searchParams.has('beta')) {
+            url.searchParams.set('beta', 'true');
+            requestInput = typeof input === 'string' || input instanceof URL ? url : new Request(url, input as Request);
+          }
+        } catch { /* ignore URL parse errors */ }
+
+        return globalThis.fetch(requestInput, { ...init, headers });
+      };
+
+      return new ChatAnthropic({
+        model: name,
+        ...opts,
+        apiKey: 'oauth-placeholder', // Dummy key to pass LangChain validation; removed by custom fetch
+        clientOptions: {
+          fetch: oauthFetch,
+          dangerouslyAllowBrowser: true,
+        },
+      });
+    }
+    return new ChatAnthropic({
       model: name,
       ...opts,
       apiKey: getApiKey('ANTHROPIC_API_KEY'),
-    }),
-  google: (name, opts) =>
-    new ChatGoogleGenerativeAI({
+    });
+  },
+  google: (name, opts) => {
+    const oauthToken = getOAuthToken('google');
+    if (oauthToken) {
+      // The @google/generative-ai SDK always sends x-goog-api-key header.
+      // For Antigravity OAuth, we need Authorization: Bearer instead.
+      // Install a global fetch interceptor for googleapis.com requests.
+      installGoogleOAuthFetch(oauthToken);
+      return new ChatGoogleGenerativeAI({
+        model: name,
+        ...opts,
+        apiKey: 'oauth-placeholder', // Needed to pass SDK validation; replaced by fetch interceptor
+      });
+    }
+    return new ChatGoogleGenerativeAI({
       model: name,
       ...opts,
       apiKey: getApiKey('GOOGLE_API_KEY'),
-    }),
+    });
+  },
   xai: (name, opts) =>
     new ChatOpenAI({
       model: name,
@@ -116,12 +345,15 @@ const MODEL_FACTORIES: Record<string, ModelFactory> = {
     }),
 };
 
-const DEFAULT_FACTORY: ModelFactory = (name, opts) =>
-  new ChatOpenAI({
+const DEFAULT_FACTORY: ModelFactory = (name, opts) => {
+  // Check OAuth credentials first, then fall back to env API key
+  const oauthToken = getOAuthToken('openai');
+  return new ChatOpenAI({
     model: name,
     ...opts,
-    apiKey: getApiKey('OPENAI_API_KEY'),
+    apiKey: oauthToken ?? getApiKey('OPENAI_API_KEY'),
   });
+};
 
 export function getChatModel(
   modelName: string = DEFAULT_MODEL,

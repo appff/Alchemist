@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { config } from 'dotenv';
 import { getProviderById } from '@/providers';
+import { hasValidCredentials } from '@/auth';
 
 // Load .env on module import
 config({ quiet: true });
@@ -14,6 +15,9 @@ export function getProviderDisplayName(providerId: string): string {
 }
 
 export function checkApiKeyExistsForProvider(providerId: string): boolean {
+  // Check OAuth credentials first (e.g., from /auth login)
+  if (hasValidCredentials(providerId)) return true;
+
   const apiKeyName = getApiKeyNameForProvider(providerId);
   if (!apiKeyName) return true;
   return checkApiKeyExists(apiKeyName);

@@ -14,7 +14,6 @@ Intelligent meta-tool for financial data research. Takes a natural language quer
 - Analyst estimates and price targets
 - Company news and announcements
 - Insider trading activity
-- Cryptocurrency prices
 - Revenue segment breakdowns
 - Multi-company comparisons (pass the full query, it handles routing internally)
 

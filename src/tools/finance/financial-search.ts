@@ -16,15 +16,12 @@ import { getIncomeStatements, getBalanceSheets, getCashFlowStatements, getAllFin
 import { getKeyRatios } from './key-ratios.js';
 import { getAnalystEstimates } from './estimates.js';
 import { getSegmentedRevenues } from './segments.js';
-import { getCryptoPriceSnapshot, getCryptoPrices, getCryptoTickers } from './crypto.js';
 import { getInsiderTrades } from './insider_trades.js';
 
 // All finance tools available for routing
+// Note: Crypto tools (getCryptoPriceSnapshot, getCryptoPrices, getCryptoTickers) have been
+// moved to the dedicated crypto_search tool for richer CoinGecko/DeFiLlama data.
 const FINANCE_TOOLS: StructuredToolInterface[] = [
-  // Price Data
-  getCryptoPriceSnapshot,
-  getCryptoPrices,
-  getCryptoTickers,
   // Fundamentals
   getIncomeStatements,
   getBalanceSheets,
@@ -93,7 +90,7 @@ export function createFinancialSearch(model: string): DynamicStructuredTool {
 - Financial metrics (P/E ratio, market cap, EPS, dividend yield)
 - Analyst estimates and price targets
 - Insider trading activity
-- Cryptocurrency prices`,
+- Note: For cryptocurrency data, use crypto_search instead`,
     schema: FinancialSearchInputSchema,
     func: async (input, _runManager, config?: RunnableConfig) => {
       const onProgress = config?.metadata?.onProgress as ((msg: string) => void) | undefined;

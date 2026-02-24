@@ -1,4 +1,4 @@
-import { Container, ProcessTerminal, Spacer, Text, TUI } from '@mariozechner/pi-tui';
+import { Container, ProcessTerminal, Spacer, Text, TUI, CombinedAutocompleteProvider, type SlashCommand } from '@mariozechner/pi-tui';
 import type {
   AgentEvent,
   ApprovalDecision,
@@ -13,6 +13,7 @@ import type { DisplayEvent } from './agent/types.js';
 import { logger } from './utils/logger.js';
 import {
   AgentRunnerController,
+  AuthController,
   InputHistoryController,
   ModelSelectionController,
 } from './controllers/index.js';
@@ -25,10 +26,12 @@ import {
   IntroComponent,
   WorkingIndicatorComponent,
   createApiKeyConfirmSelector,
+  createAuthProviderSelector,
   createModelSelector,
   createProviderSelector,
 } from './components/index.js';
 import { editorTheme, theme } from './theme.js';
+import { discoverSkills } from './skills/registry.js';
 
 function truncateAtWord(str: string, maxLength: number): string {
   if (str.length <= maxLength) {
@@ -182,6 +185,11 @@ export async function runCli() {
     tui.requestRender();
   });
 
+  const authController = new AuthController(onError, () => {
+    renderSelectionOverlay();
+    tui.requestRender();
+  });
+
   const agentRunner = new AgentRunnerController(
     { model: modelSelection.model, modelProvider: modelSelection.provider, maxIterations: 10 },
     modelSelection.inMemoryChatHistory,
@@ -197,6 +205,22 @@ export async function runCli() {
   const errorText = new Text('', 0, 0);
   const workingIndicator = new WorkingIndicatorComponent(tui);
   const editor = new CustomEditor(tui, editorTheme);
+
+  // Set up slash command autocomplete
+  const slashCommands: SlashCommand[] = [
+    { name: 'model', description: 'Switch LLM provider and model' },
+    { name: 'auth', description: 'Authenticate with a provider' },
+    { name: 'auth logout', description: 'Clear stored credentials' },
+    { name: 'exit', description: 'Exit Dexter' },
+    ...discoverSkills().map(skill => ({
+      name: skill.name,
+      description: skill.description,
+    })),
+  ];
+  editor.setAutocompleteProvider(
+    new CombinedAutocompleteProvider(slashCommands, process.cwd()),
+  );
+
   const debugPanel = new DebugPanelComponent(8, true);
 
   tui.addChild(root);
@@ -213,13 +237,51 @@ export async function runCli() {
       return;
     }
 
+    if (query === '/exit' || query === '/quit') {
+      tui.stop();
+      process.exit(0);
+      return;
+    }
+
     if (query === '/model') {
       modelSelection.startSelection();
       return;
     }
 
-    if (modelSelection.isInSelectionFlow() || agentRunner.pendingApproval || agentRunner.isProcessing) {
+    if (query === '/auth' || query === '/auth login') {
+      authController.startAuthFlow();
       return;
+    }
+
+    if (query === '/auth logout') {
+      authController.handleLogout();
+      return;
+    }
+
+    if (modelSelection.isInSelectionFlow() || authController.isInAuthFlow() || agentRunner.pendingApproval || agentRunner.isProcessing) {
+      return;
+    }
+
+    // Skill slash command routing
+    const skillMatch = query.match(/^\/(\S+)\s*(.*)?$/);
+    if (skillMatch) {
+      const [, skillName, args] = skillMatch;
+      const skills = discoverSkills();
+      const skill = skills.find(s => s.name === skillName);
+      if (skill) {
+        const skillQuery = args?.trim()
+          ? `Use the ${skillName} skill: ${args.trim()}`
+          : `Use the ${skillName} skill`;
+        await inputHistory.saveMessage(query);
+        inputHistory.resetNavigation();
+        const result = await agentRunner.runQuery(skillQuery);
+        if (result?.answer) {
+          await inputHistory.updateAgentResponse(result.answer);
+        }
+        refreshError();
+        tui.requestRender();
+        return;
+      }
     }
 
     await inputHistory.saveMessage(query);
@@ -241,6 +303,10 @@ export async function runCli() {
   };
 
   editor.onEscape = () => {
+    if (authController.isInAuthFlow()) {
+      authController.cancelAuthFlow();
+      return;
+    }
     if (modelSelection.isInSelectionFlow()) {
       modelSelection.cancelSelection();
       return;
@@ -252,6 +318,10 @@ export async function runCli() {
   };
 
   editor.onCtrlC = () => {
+    if (authController.isInAuthFlow()) {
+      authController.cancelAuthFlow();
+      return;
+    }
     if (modelSelection.isInSelectionFlow()) {
       modelSelection.cancelSelection();
       return;
@@ -295,10 +365,80 @@ export async function runCli() {
   };
 
   const renderSelectionOverlay = () => {
+    const authState = authController.getState();
     const state = modelSelection.state;
-    if (state.appState === 'idle' && !agentRunner.pendingApproval) {
+
+    if (state.appState === 'idle' && !agentRunner.pendingApproval && authState === 'idle') {
       refreshError();
       renderMainView();
+      return;
+    }
+
+    // Auth flow overlays
+    if (authState === 'provider_select') {
+      const selector = createAuthProviderSelector((providerId) => {
+        authController.handleProviderSelect(providerId);
+      });
+      renderScreenView(
+        'Authenticate',
+        'Select a provider to authenticate with.',
+        selector,
+        'Enter to confirm · esc to cancel',
+        selector,
+      );
+      return;
+    }
+
+    if (authState === 'oauth_waiting' || authState === 'device_auth_waiting') {
+      const messageText = new Text(theme.info(authController.getMessage()), 0, 0);
+      renderScreenView(
+        'Waiting for authentication',
+        '',
+        messageText,
+        'esc to cancel',
+      );
+      return;
+    }
+
+    if (authState === 'code_input') {
+      const input = new ApiKeyInputComponent();
+      input.onSubmit = (value) => authController.handleCodeInput(value ?? '');
+      input.onCancel = () => authController.cancelAuthFlow();
+      renderScreenView(
+        'Enter authorization code',
+        authController.getMessage(),
+        input,
+        'Enter to confirm · esc to cancel',
+        input,
+      );
+      return;
+    }
+
+    if (authState === 'api_key_input') {
+      const input = new ApiKeyInputComponent(true);
+      input.onSubmit = (apiKey) => authController.handleApiKeyInput(apiKey);
+      input.onCancel = () => authController.cancelAuthFlow();
+      const provider = authController.getSelectedProvider();
+      const displayName = provider ? getProviderDisplayName(provider) : 'Provider';
+      renderScreenView(
+        `Enter ${displayName} API Key`,
+        authController.getMessage() || '',
+        input,
+        'Enter to confirm · esc to cancel',
+        input,
+      );
+      return;
+    }
+
+    if (authState === 'complete') {
+      const messageText = new Text(theme.success(authController.getMessage()), 0, 0);
+      renderScreenView('Authentication', '', messageText);
+      return;
+    }
+
+    if (authState === 'error') {
+      const messageText = new Text(theme.error(authController.getMessage()), 0, 0);
+      renderScreenView('Authentication Error', '', messageText, 'Will return shortly...');
       return;
     }
 

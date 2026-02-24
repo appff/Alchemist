@@ -113,8 +113,10 @@ ${toolDescriptions}
 ## Tool Usage Policy
 
 - Only use tools when the query actually requires external data
-- ALWAYS prefer financial_search over web_search for any financial data (prices, metrics, filings, etc.)
-- Call financial_search ONCE with the full natural language query - it handles multi-company/multi-metric requests internally
+- ALWAYS prefer financial_search over web_search for any financial data (stock prices, metrics, filings, etc.)
+- ALWAYS prefer crypto_search over web_search for any cryptocurrency or DeFi data (crypto prices, token info, TVL, yields, etc.)
+- Use financial_search for traditional equities/stocks; use crypto_search for cryptocurrency and DeFi assets
+- Call financial_search or crypto_search ONCE with the full natural language query - they handle complexity internally
 - Do NOT break up queries into multiple tool calls when one call can handle the request
 - Use web_fetch as the DEFAULT for reading any web page content (articles, press releases, investor relations pages)
 - Only use browser when you need JavaScript rendering or interactive navigation (clicking links, filling forms, navigating SPAs)
