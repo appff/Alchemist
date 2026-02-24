@@ -563,11 +563,11 @@ function toAntigravityModelName(model: string): string {
     .replace(/-preview-customtools$/i, '')
     .replace(/-preview$/i, '');
 
-  // Gemini 3 Pro models default to -low tier
-  const isGemini3Pro = /^gemini-3(\.1)?-pro$/i.test(name);
+  // Gemini 3.1 Pro models default to -high tier
+  const isGemini31Pro = /^gemini-3\.1-pro$/i.test(name);
   const hasTier = /-(low|medium|high)$/i.test(name);
-  if (isGemini3Pro && !hasTier) {
-    name = `${name}-low`;
+  if (isGemini31Pro && !hasTier) {
+    name = `${name}-high`;
   }
 
   return name;
